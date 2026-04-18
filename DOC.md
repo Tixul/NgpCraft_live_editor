@@ -1,0 +1,242 @@
+# NgpCraft Live Editor
+
+Browser-based live C editor for Neo Geo Pocket development and learning.
+Write code, run it immediately, and inspect the framebuffer, palettes, logs,
+and a few hardware-style guardrails without leaving the browser.
+
+This README only documents files and behavior that exist in this directory.
+The source of truth is the current code in `js/`, `template/`, and the small
+helper scripts at the repository root of this tool.
+
+## Quick start
+
+From this directory:
+
+```bash
+python -m http.server 8000
+```
+
+Open <http://localhost:8000> in a modern browser.
+
+Notes:
+
+- Click the canvas once so it receives keyboard focus.
+- The default project already contains a starter `src/main.c`.
+- A local HTTP server is the safest way to run the editor.
+
+Minimal example:
+
+```c
+#include "ngpc_sys.h"
+#include "ngpc_gfx.h"
+#include "ngpc_text.h"
+
+void main(void)
+{
+    ngpc_init();
+    ngpc_load_sysfont();
+
+    ngpc_gfx_set_bg_color(RGB(0, 0, 6));
+    ngpc_gfx_set_palette(GFX_SCR1, 0,
+                         RGB(0, 0, 0), RGB(15, 15, 15),
+                         RGB(0, 15, 0), RGB(0, 15, 15));
+    ngpc_gfx_clear(GFX_SCR1);
+
+    ngpc_text_print(GFX_SCR1, 0, 4, 9, "Hello World");
+}
+```
+
+Optional URL parameter:
+
+- `?frames=N` limits execution to `N` frames. Useful for screenshots and
+  deterministic checks.
+
+## Main features
+
+- Project tree with editable `src/*.c` files and generated or imported
+  `src/*.h` files.
+- Syntax-highlighted editor with tabs, line numbers, and autocomplete.
+- Live run, manual run, pause, single-step, and reset controls.
+- Curated built-in examples from `js/examples.js`, including a bundled
+  multi-file example stored in `js/example_bundles.js`.
+- Framebuffer renderer, palette viewer, log filters, and keyboard rebinding.
+- PNG importer that converts an image into a metasprite or tilemap source pair.
+
+## UI overview
+
+- Left pane: project tree, new-file button, import, JSON export, ZIP export.
+- Center pane: code editor and example selector.
+- Right pane: screen, log, hardware budget, palette inspector, key mapping.
+
+Toolbar actions:
+
+- `Live`: auto-run after edits.
+- `Autocomplete`: enable or disable the popup.
+- `Pause`, `Step`, `Reset`: control the frame loop.
+- `Run (Ctrl+Enter)`: compile and run immediately.
+- `?`: keyboard shortcut help.
+
+## Project model
+
+- The entry file is `src/main.c`.
+- Every editable `src/*.c` file is included on each run.
+- `src/main.c` is processed last so helper code in other `.c` files is already
+  available when `main()` runs.
+- `#include` resolution searches the project tree and prefers matching headers.
+- Files under `template/src/` are bundled as read-only reference headers plus
+  the starter entry file.
+
+## Import and export
+
+Tree-pane actions:
+
+- `+` creates a new `src/<name>.c`.
+- Import button: imports files.
+- `{ }` exports a JSON bundle.
+- `zip` exports a ZIP archive.
+
+Import behavior:
+
+- One `.json` file: full-project import through `NGPC_Project.importBundle(...)`.
+- One `.zip` file: only `.c` entries are kept, normalized into `src/*.c`, then
+  imported as a full project replacement.
+- One or more `.c` files: merged into the current project by filename.
+- One `.png` file: opens the asset-import modal and generates source files.
+
+PNG import output:
+
+- Sprite import generates `src/<name>_mspr.c` and `src/<name>_mspr.h`.
+- Tilemap import generates `src/<name>.c` and `src/<name>.h`.
+
+Export behavior:
+
+- JSON export writes editable `.c` files only.
+- ZIP export writes editable `.c` files only.
+- Template files from `template/src/` are never exported.
+
+Important current limitation:
+
+- Generated or imported `.h` files can exist in the in-browser project and are
+  usable by `#include`, but the export buttons currently save editable `.c`
+  files only. If you need a generated header outside the browser session, use
+  the file download button while that header is open.
+
+## Runtime coverage
+
+The tool is not a CPU emulator. It transpiles a curated C subset to
+JavaScript and executes it against an emulated NGPC-style memory map and VDP.
+
+Implemented at a practical level:
+
+- Memory map and pointer-backed reads and writes in `js/memory.js` and
+  `js/runtime.js`.
+- Graphics helpers for tilemaps, palettes, scrolling, tile loading, and
+  background color.
+- Sprite helpers, metasprite helpers, text, bitmap drawing, input, timing,
+  simple math helpers, and palette effects.
+- `ngpc_vsync()` as the 60 Hz sync point for the host loop.
+- Hardware-style warnings for invalid OAM ids, tile indices, map coordinates,
+  palette byte writes, runaway loops, CPU budget overflow, watchdog issues,
+  and sprite overload.
+
+Audio status:
+
+- Audio calls are stubs only.
+- `Sounds_Init`, `Sfx_Play`, `Bgm_Start`, and related helpers log activity in
+  the browser log but do not produce real sound.
+
+## C subset
+
+The transpiler in `js/interpreter.js` supports the subset used by the bundled
+template, examples, and asset converters.
+
+In broad terms it handles:
+
+- Integer types, typedefs, arrays, structs, enums, prototypes, and function
+  definitions used by the tool's template.
+- Pointer variables backed by a memory Proxy model.
+- Register-style reads and writes.
+- Basic preprocessor handling for `#define`, `#include`, and common conditionals.
+- Stable line mapping for compile and runtime error reporting.
+
+It does not aim to be a full C compiler.
+
+Known non-goals or current limits:
+
+- No TLCS-900 instruction emulation.
+- No real interrupts, DMA, Z80 sound CPU, or PSG audio output.
+- No RTC or flash-save emulation.
+- Timer registers are not fully simulated.
+- One-line forms like `*p++ = 5;` are still not supported.
+- Pointer arithmetic on user-defined struct types is not modeled.
+- Bit-fields are not implemented with real storage-width semantics.
+
+## Files
+
+Top level:
+
+- `index.html`: main UI shell and script loading order.
+- `style.css`: application styling.
+- `README.md`: this document.
+- `sync_template.py`: rebuilds `js/project_data.js` from `template/`.
+- `sync_font.py`: rebuilds `js/font_data.js`.
+- `validate_transpile.py`: offline transpile smoke test.
+
+Runtime and UI:
+
+- `js/api.js`: constants and public identifiers exposed to the runtime.
+- `js/memory.js`: emulated memory and hardware guardrails.
+- `js/vdp.js`: framebuffer renderer.
+- `js/runtime.js`: JS runtime functions exposed to transpiled C.
+- `js/interpreter.js`: C-subset transpiler.
+- `js/main.js`: UI wiring, run loop, import/export, editor behavior.
+- `js/highlight.js`: syntax highlighting.
+- `js/autocomplete.js`: autocomplete popup behavior.
+- `js/autocomplete_data.js`: bundled symbol catalog.
+
+Project and assets:
+
+- `js/project.js`: virtual filesystem and project import/export logic.
+- `js/project_data.js`: generated template payload.
+- `js/examples.js`: built-in example list.
+- `js/example_bundles.js`: bundled multi-file example data.
+- `js/png_import.js`: PNG import modal controller.
+- `js/asset_tools.js`: in-browser asset conversion helpers.
+- `js/zip.js`: minimal ZIP reader/writer used by import/export.
+- `js/font.js`: font decode helpers.
+- `js/font_data.js`: generated bitmap font data.
+
+Bundled template:
+
+- `template/src/main.c`: starter entry file.
+- `template/src/core/*.h`: core headers exposed in the editor.
+- `template/src/gfx/*.h`: graphics headers exposed in the editor.
+
+## Regenerating generated files
+
+After editing files under `template/`:
+
+```bash
+python sync_template.py
+```
+
+After changing the baked font inputs or parameters:
+
+```bash
+python sync_font.py
+```
+
+To run a quick offline transpile smoke test:
+
+```bash
+python validate_transpile.py
+```
+
+## Maintenance note
+
+If the README and the code disagree, follow the code:
+
+- UI and project behavior: `index.html`, `js/main.js`, `js/project.js`
+- Runtime behavior: `js/runtime.js`, `js/memory.js`, `js/vdp.js`
+- C subset support: `js/interpreter.js`
+- Bundled headers and starter project: `template/`, `js/project_data.js`
