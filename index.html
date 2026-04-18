@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NgpCraft Live Editor</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="top-banner">Neo Geo Pocket Live Dev Environment</div>
+  <header>
+    <h1>NgpCraft Live Editor</h1>
+    <span class="status" id="status">Loading…</span>
+    <span class="status" id="fps-status" title="Frames rendered since last run / measured FPS">—</span>
+    <div class="header-spacer"></div>
+    <label class="toolbar-item"><input type="checkbox" id="live-toggle" checked> Live</label>
+    <label class="toolbar-item" title="Autocomplete (Ctrl+Space to force the popup)"><input type="checkbox" id="autocomplete-toggle" checked> Autocomplete</label>
+    <button id="pause-btn" class="toolbar-btn" title="Pause the frame loop" type="button">❚❚</button>
+    <button id="step-btn" class="toolbar-btn" title="Advance exactly one frame (when paused)" type="button">▶|</button>
+    <button id="reset-btn" class="toolbar-btn" title="Reset memory and re-run main()" type="button">↻</button>
+    <button id="run-btn" class="toolbar-btn">Run (Ctrl+Enter)</button>
+    <button id="help-btn" class="toolbar-btn" title="Keyboard shortcuts" type="button">?</button>
+  </header>
+
+  <!-- PNG asset-import dialog. Populated by js/png_import.js the first time
+       a PNG is dropped onto the tree pane. Stays outside <main> so it
+       floats above every panel via z-index. -->
+  <div id="asset-import-modal" class="modal" hidden>
+    <div class="modal-card">
+      <h3 id="asset-import-title">Import PNG</h3>
+      <div class="modal-body">
+        <div class="modal-preview">
+          <canvas id="asset-import-preview" width="128" height="128"></canvas>
+          <div class="modal-file-info" id="asset-import-info">—</div>
+        </div>
+        <div class="modal-fields">
+          <div class="modal-field">
+            <label>Kind</label>
+            <div class="modal-kind-row">
+              <label><input type="radio" name="asset-kind" value="sprite" checked> Sprite (metasprite + anim)</label>
+              <label><input type="radio" name="asset-kind" value="tilemap"> Tilemap (scroll background)</label>
+            </div>
+          </div>
+
+          <div class="modal-field">
+            <label for="asset-name">Base symbol / filename</label>
+            <input type="text" id="asset-name" placeholder="player">
+          </div>
+
+          <!-- Sprite-specific params. -->
+          <fieldset class="modal-fieldset" id="asset-sprite-params">
+            <legend>Sprite</legend>
+            <div class="modal-grid">
+              <label>Frame W <input type="number" id="asset-frame-w" value="16" min="8" step="8"></label>
+              <label>Frame H <input type="number" id="asset-frame-h" value="16" min="8" step="8"></label>
+              <label>Frame count <input type="number" id="asset-frame-count" placeholder="auto" min="1"></label>
+              <label>Tile base <input type="number" id="asset-tile-base" value="0" min="0" max="511"></label>
+              <label>Pal base <input type="number" id="asset-pal-base" value="0" min="0" max="15"></label>
+              <label>Anim dur. <input type="number" id="asset-anim-duration" value="6" min="1" max="255"></label>
+            </div>
+          </fieldset>
+
+          <!-- Tilemap-specific params. -->
+          <fieldset class="modal-fieldset" id="asset-tilemap-params" hidden>
+            <legend>Tilemap</legend>
+            <div class="modal-grid">
+              <label>Max palettes <input type="number" id="asset-max-palettes" value="16" min="1" max="16"></label>
+              <label class="modal-checkbox-label"><input type="checkbox" id="asset-black-transparent"> Treat black as transparent</label>
+            </div>
+          </fieldset>
+
+          <div class="modal-status" id="asset-import-status"></div>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="toolbar-btn" id="asset-import-cancel">Cancel</button>
+        <button type="button" class="toolbar-btn" id="asset-import-ok">Import</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Keyboard shortcuts popover (toggled by the ? button, dismissed on
+       outside click or Esc). Lives outside <main> so z-index stacking is
+       simple and the popover always floats above every panel. -->
+  <div id="help-popover" class="help-popover" hidden>
+    <h3>Keyboard shortcuts</h3>
+    <dl>
+      <dt>Ctrl+Enter</dt> <dd>Run the current project</dd>
+      <dt>Ctrl+Space</dt> <dd>Force the autocomplete popup</dd>
+      <dt>↑ / ↓</dt>      <dd>Move selection in the autocomplete list</dd>
+      <dt>Enter / Tab</dt><dd>Insert the selected suggestion</dd>
+      <dt>Esc</dt>        <dd>Close the autocomplete popup</dd>
+      <dt>Tab (no popup)</dt><dd>Indent by 4 spaces</dd>
+      <dt>Ctrl+Tab</dt>   <dd>Cycle to the next editor tab</dd>
+      <dt>Ctrl+Shift+Tab</dt><dd>Cycle to the previous editor tab</dd>
+      <dt>Middle-click a tab</dt><dd>Close it</dd>
+    </dl>
+  </div>
+
+  <main>
+    <aside class="tree-pane">
+      <div class="pane-title">
+        Project
+        <span class="pane-title-actions">
+          <button id="new-file-btn"     class="tree-action-btn" title="Create a new .c file under src/" type="button">+</button>
+          <button id="import-project-btn" class="tree-action-btn" title="Import .json bundle, .zip archive, individual .c files, or a .png asset (sprite/tilemap converter)" type="button">⇧</button>
+          <button id="export-json-btn"  class="tree-action-btn tree-action-btn-text" title="Download as a JSON bundle (roundtrips inside this editor)" type="button">{ }</button>
+          <button id="export-zip-btn"   class="tree-action-btn tree-action-btn-text" title="Download as a .zip archive (raw .c files, pipe into a real NGPC build)" type="button">zip</button>
+        </span>
+      </div>
+      <input type="file" id="import-project-input" accept=".json,application/json,.zip,application/zip,.c,text/x-c,.png,image/png" multiple hidden>
+      <div id="tree" class="tree"></div>
+    </aside>
+
+    <section class="editor-pane">
+      <div class="tab-bar">
+        <div id="tabs-list" class="tabs-list" role="tablist"></div>
+        <select id="example-select" class="tab-action-select" title="Load a curated example or full example project">
+          <option value="">Load example…</option>
+        </select>
+        <button id="download-btn" class="tab-action-btn" title="Download current file" type="button">↓</button>
+      </div>
+      <div class="editor-wrap">
+        <pre id="code-gutter" class="code-gutter" aria-hidden="true"></pre>
+        <pre id="code-hl" class="code-hl" aria-hidden="true"></pre>
+        <textarea id="code" spellcheck="false" autocomplete="off" placeholder="Loading project…"></textarea>
+      </div>
+    </section>
+
+    <section class="screen-pane">
+      <div class="screen-toolbar">
+        <span class="screen-toolbar-label">Screen</span>
+        <label class="screen-toolbar-zoom">Zoom
+          <select id="screen-zoom" title="Canvas scale (purely cosmetic, the emulated 160x152 image is unchanged)">
+            <option value="1">1×</option>
+            <option value="2">2×</option>
+            <option value="3" selected>3×</option>
+            <option value="4">4×</option>
+          </select>
+        </label>
+      </div>
+      <div class="screen-wrap">
+        <canvas id="screen" width="160" height="152"></canvas>
+      </div>
+      <div class="log-toolbar">
+        <span class="log-toolbar-label">Log</span>
+        <label><input type="checkbox" id="log-filter-info" checked> info</label>
+        <label><input type="checkbox" id="log-filter-err"  checked> err</label>
+        <label><input type="checkbox" id="log-filter-audio" checked> audio</label>
+        <button id="log-clear-btn" class="toolbar-btn" type="button">Clear</button>
+      </div>
+      <pre id="log" aria-label="Log output"></pre>
+
+      <details class="debug-panel" open>
+        <summary>Hardware budget</summary>
+        <div class="budget-row">
+          <span class="budget-label">CPU</span>
+          <div class="budget-bar"><div class="budget-fill" id="cpu-fill"></div></div>
+          <span class="budget-value" id="cpu-value">—</span>
+        </div>
+        <div class="budget-row">
+          <span class="budget-label">Watchdog</span>
+          <div class="budget-bar"><div class="budget-fill" id="wd-fill"></div></div>
+          <span class="budget-value" id="wd-value">—</span>
+        </div>
+        <div class="budget-row">
+          <span class="budget-label">Char over</span>
+          <span class="budget-value" id="char-over-value">—</span>
+        </div>
+      </details>
+
+      <details class="palette-panel">
+        <summary>Palettes (16 × 4 colours × 3 planes)</summary>
+        <div class="palette-row">
+          <span class="palette-label">SCR1</span>
+          <canvas id="pal-scr1" width="128" height="32"></canvas>
+        </div>
+        <div class="palette-row">
+          <span class="palette-label">SCR2</span>
+          <canvas id="pal-scr2" width="128" height="32"></canvas>
+        </div>
+        <div class="palette-row">
+          <span class="palette-label">SPR</span>
+          <canvas id="pal-spr" width="128" height="32"></canvas>
+        </div>
+        <div class="palette-row">
+          <span class="palette-label">BG</span>
+          <canvas id="pal-bg" width="64" height="8"></canvas>
+        </div>
+      </details>
+
+      <details class="keymap-panel">
+        <summary>Keyboard ↔ NGPC joypad</summary>
+        <table class="keymap-table">
+          <tbody id="keymap-rows"></tbody>
+        </table>
+        <button id="keymap-reset" class="toolbar-btn" type="button">Reset to defaults</button>
+      </details>
+    </section>
+  </main>
+
+  <script src="js/api.js"></script>
+  <script src="js/memory.js"></script>
+  <script src="js/font_data.js"></script>
+  <script src="js/font.js"></script>
+  <script src="js/runtime.js"></script>
+  <script src="js/highlight.js"></script>
+  <script src="js/vdp.js"></script>
+  <script src="js/interpreter.js"></script>
+  <script src="js/project_data.js"></script>
+  <script src="js/project.js"></script>
+  <script src="js/example_bundles.js"></script>
+  <script src="js/examples.js"></script>
+  <script src="js/autocomplete_data.js"></script>
+  <script src="js/autocomplete.js"></script>
+  <script src="js/zip.js"></script>
+  <script src="js/asset_tools.js"></script>
+  <script src="js/png_import.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>
