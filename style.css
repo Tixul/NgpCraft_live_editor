@@ -1012,11 +1012,13 @@ main {
     display: block;
   }
 
-  /* OPTION — top right */
+  /* OPTION — stacked just above the A / B action buttons (same column).
+   * A/B sit at bottom 24 with 52 px height → their top edge is ~76 px from
+   * bottom. 88 px keeps a small gap. right: 20 px matches the A/B column. */
   .jp-option {
     position: absolute;
-    top: 12px;
-    right: 16px;
+    bottom: 88px;
+    right: 20px;
     pointer-events: auto;
   }
 
