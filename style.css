@@ -917,6 +917,12 @@ main {
   }
   /* Zoom selector useless on mobile — canvas fills responsively. */
   .screen-toolbar-zoom { display: none; }
+  /* Keyboard-shortcut help button + popover are PC-only. */
+  #help-btn,
+  #help-popover { display: none !important; }
+  /* "Run (Ctrl+Enter)" label too long on phone — simplify. */
+  #run-btn { font-size: 0; }
+  #run-btn::before { content: "Run"; font-size: 0.85rem; }
   /* Log and debug panels compact below canvas */
   body[data-mobile-tab="screen"] #log { max-height: 80px; }
   body[data-mobile-tab="screen"] .debug-panel,
@@ -932,8 +938,48 @@ main {
     flex-shrink: 0;
   }
 
-  /* Autocomplete popup: avoid going off-screen */
-  .autocomplete-popup { max-width: calc(100vw - 1rem); }
+  /* Autocomplete popup: anchor full-width at the bottom of the visible
+     viewport so the soft keyboard never hides it, and stack list+doc
+     vertically so both are always readable. */
+  .autocomplete-popup {
+    left: 4px !important;
+    right: 4px !important;
+    top: auto !important;
+    bottom: 4px !important;
+    width: auto !important;
+    max-width: none !important;
+    grid-template-columns: 1fr !important;
+    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+    max-height: min(60vh, 360px);
+    font-size: 13px;
+  }
+  .autocomplete-list {
+    border-right: none;
+    border-bottom: 1px solid #333;
+    max-height: 180px;
+  }
+  .autocomplete-item {
+    padding: 0.45rem 0.6rem;
+    font-size: 13px;
+  }
+  .autocomplete-doc { padding: 0.6rem 0.7rem 1.8rem; }
+  .ac-sig  { font-size: 12px; }
+  .ac-desc { font-size: 11.5px; }
+  /* Discoverability hint for the tap-to-preview / tap-again-to-insert UX */
+  .autocomplete-doc::after {
+    content: 'Tap selection again to insert';
+    position: absolute;
+    left: 0; right: 0; bottom: 0;
+    padding: 0.3rem;
+    background: #252526;
+    border-top: 1px solid #333;
+    color: #888;
+    font-size: 10px;
+    text-align: center;
+    letter-spacing: 0.03em;
+  }
+  .autocomplete-popup { position: fixed; }
+  .autocomplete-doc { position: relative; }
 
   /* Modals: fit small screens */
   .modal { padding: 0.5rem; }

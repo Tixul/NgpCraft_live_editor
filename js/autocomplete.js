@@ -84,13 +84,20 @@ const NGPC_Autocomplete = (() => {
       selected = Number(li.dataset.idx);
       renderSelection();
     });
-    // Touch: tap to insert (preventDefault keeps textarea focused).
+    // Touch: first tap previews (shows description), second tap on the same
+    // item inserts. Mirrors keyboard nav (arrows preview, Enter inserts) and
+    // lets the user browse descriptions without accidental insertion.
     listEl.addEventListener('touchend', (e) => {
       e.preventDefault();
       const li = e.target.closest('li[data-idx]');
       if (!li) return;
-      selected = Number(li.dataset.idx);
-      insertSelected();
+      const idx = Number(li.dataset.idx);
+      if (idx === selected) {
+        insertSelected();
+      } else {
+        selected = idx;
+        renderSelection();
+      }
     }, { passive: false });
   }
 
