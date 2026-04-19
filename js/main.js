@@ -797,6 +797,53 @@
     URL.revokeObjectURL(url);
   });
 
+  // ---- New project button ----
+  const MINIMAL_MAIN = `#include "ngpc_sys.h"
+#include "ngpc_gfx.h"
+#include "ngpc_input.h"
+
+void main(void) {
+    ngpc_init();
+    ngpc_load_sysfont();
+
+    while (1) {
+        ngpc_input_update();
+        ngpc_vsync();
+    }
+}
+`;
+
+  document.getElementById('new-project-btn').addEventListener('click', () => {
+    const extras = NGPC_Project.listPaths().filter(p => {
+      const f = NGPC_Project.getFile(p);
+      return f && f.userCreated;
+    });
+    const mainContent = NGPC_Project.getFile('src/main.c')?.content ?? '';
+    const isDirty = mainContent.trim() !== MINIMAL_MAIN.trim() || extras.length > 0;
+    if (isDirty && !confirm('Start a new project? Current files will be lost.')) return;
+
+    // Remove all user-created files and close their tabs
+    for (const p of extras) {
+      NGPC_Project.removeFile(p);
+      const idx = openTabs.indexOf(p);
+      if (idx >= 0) openTabs.splice(idx, 1);
+      lastRunContent.delete(p);
+    }
+
+    // Reset main.c
+    NGPC_Project.setContent('src/main.c', MINIMAL_MAIN);
+    lastRunContent.delete('src/main.c');
+
+    // Ensure main.c is the only open tab
+    openTabs.length = 0;
+    openTabs.push('src/main.c');
+    persistTabs();
+
+    renderTree();
+    openFile('src/main.c');
+    runEntry();
+  });
+
   // ---- New file button ----
   const newFileBtn = document.getElementById('new-file-btn');
   newFileBtn.addEventListener('click', () => {
@@ -833,6 +880,19 @@
   // NGPC_PROJECT_DATA and are re-baked by sync_template.py.
 
   function downloadBlob(blob, filename) {
+    // Android WebView bridge: delegate to native save dialog (SAF).
+    if (window.AndroidBridge && typeof window.AndroidBridge.saveFile === 'function') {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const b64 = String(reader.result).split(',')[1] || '';
+        window.AndroidBridge.saveFile(
+          filename, b64, blob.type || 'application/octet-stream'
+        );
+      };
+      reader.readAsDataURL(blob);
+      return;
+    }
+    // Browser fallback
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -1238,6 +1298,9 @@ void ${baseName}_update(void)
       if (result && typeof result.next === 'function') {
         setStatus('Running (60 Hz)', 'ok');
         driveGenerator(result);
+        if (window.innerWidth < 1024 && document.activeElement !== codeEl) {
+          setMobileTab('screen');
+        }
       } else {
         NGPC_VDP.render(ctx);
         setStatus('OK', 'ok');
@@ -1247,6 +1310,73 @@ void ${baseName}_update(void)
       log(e.message || String(e), 'err');
       NGPC_VDP.render(ctx);
     }
+  }
+
+  // ---- Joypad overlay (touch) ----
+  const JP_BITS = { up: 0x01, down: 0x02, left: 0x04, right: 0x08,
+                    a: 0x10, b: 0x20, option: 0x40 };
+
+  document.querySelectorAll('.jp-btn[data-pad]').forEach(btn => {
+    const bit = JP_BITS[btn.dataset.pad];
+    if (!bit) return;
+
+    function press(e) {
+      e.preventDefault();
+      padState |= bit;
+      NGPC_Memory.write8(0x6F82, padState);
+      btn.classList.add('pressed');
+    }
+    function release(e) {
+      e.preventDefault();
+      padState &= ~bit;
+      NGPC_Memory.write8(0x6F82, padState);
+      btn.classList.remove('pressed');
+    }
+
+    btn.addEventListener('touchstart',  press,   { passive: false });
+    btn.addEventListener('touchend',    release, { passive: false });
+    btn.addEventListener('touchcancel', release, { passive: false });
+    // Fallback for DevTools click simulation
+    btn.addEventListener('mousedown', press);
+    btn.addEventListener('mouseup',   release);
+    btn.addEventListener('mouseleave', release);
+  });
+
+  // ---- Mobile tab switching ----
+  const MOBILE_TAB_KEY = 'ngpc-live-editor.mobile-tab.v1';
+  const mobileTabBtns = document.querySelectorAll('.mobile-tab-btn');
+
+  function setMobileTab(tab) {
+    document.body.dataset.mobileTab = tab;
+    localStorage.setItem(MOBILE_TAB_KEY, tab);
+    mobileTabBtns.forEach(btn =>
+      btn.classList.toggle('active', btn.dataset.tab === tab)
+    );
+  }
+
+  mobileTabBtns.forEach(btn =>
+    btn.addEventListener('click', () => setMobileTab(btn.dataset.tab))
+  );
+
+  setMobileTab(localStorage.getItem(MOBILE_TAB_KEY) || 'code');
+
+  // On mobile, collapse debug panels so canvas gets maximum screen space.
+  if (window.innerWidth < 1024) {
+    document.querySelectorAll('.debug-panel, .palette-panel, .keymap-panel')
+      .forEach(el => el.removeAttribute('open'));
+  }
+
+  // ---- Soft keyboard / viewport resize (1-E) ----
+  // On Android, the soft keyboard shrinks visualViewport but not window.
+  // We pin body height to visualViewport.height so panes never hide behind it.
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', () => {
+      if (window.innerWidth < 1024) {
+        document.body.style.height = window.visualViewport.height + 'px';
+      } else {
+        document.body.style.height = '';
+      }
+    });
   }
 
   // ---- Boot ----

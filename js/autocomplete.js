@@ -84,6 +84,14 @@ const NGPC_Autocomplete = (() => {
       selected = Number(li.dataset.idx);
       renderSelection();
     });
+    // Touch: tap to insert (preventDefault keeps textarea focused).
+    listEl.addEventListener('touchend', (e) => {
+      e.preventDefault();
+      const li = e.target.closest('li[data-idx]');
+      if (!li) return;
+      selected = Number(li.dataset.idx);
+      insertSelected();
+    }, { passive: false });
   }
 
   // Caret-position math. We mirror the textarea's styles on a hidden <div>,

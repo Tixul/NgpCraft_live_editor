@@ -102,6 +102,7 @@
       <div class="pane-title">
         Project
         <span class="pane-title-actions">
+          <button id="new-project-btn"  class="tree-action-btn" title="New project — reset to a minimal main.c template" type="button">⬜</button>
           <button id="new-file-btn"     class="tree-action-btn" title="Create a new .c file under src/" type="button">+</button>
           <button id="import-project-btn" class="tree-action-btn" title="Import .json bundle, .zip archive, individual .c files, or a .png asset (sprite/tilemap converter)" type="button">⇧</button>
           <button id="export-json-btn"  class="tree-action-btn tree-action-btn-text" title="Download as a JSON bundle (roundtrips inside this editor)" type="button">{ }</button>
@@ -198,6 +199,35 @@
       </details>
     </section>
   </main>
+
+  <!-- Joypad overlay — fixed over viewport, visible only on mobile screen tab -->
+  <div class="joypad-overlay" aria-hidden="true">
+    <button class="jp-btn jp-option" data-pad="option" type="button">OPT</button>
+    <div class="jp-dpad">
+      <button class="jp-btn jp-up"    data-pad="up"    type="button">▲</button>
+      <button class="jp-btn jp-left"  data-pad="left"  type="button">◀</button>
+      <div    class="jp-center"></div>
+      <button class="jp-btn jp-right" data-pad="right" type="button">▶</button>
+      <button class="jp-btn jp-down"  data-pad="down"  type="button">▼</button>
+    </div>
+    <div class="jp-actions">
+      <button class="jp-btn jp-a" data-pad="a" type="button">A</button>
+      <button class="jp-btn jp-b" data-pad="b" type="button">B</button>
+    </div>
+  </div>
+
+  <!-- Mobile bottom tab bar (hidden on desktop via CSS @media) -->
+  <nav class="mobile-tabbar" aria-label="Panels">
+    <button class="mobile-tab-btn" data-tab="files" type="button">
+      <span class="tab-icon">📁</span>Files
+    </button>
+    <button class="mobile-tab-btn" data-tab="code" type="button">
+      <span class="tab-icon">&lt;/&gt;</span>Code
+    </button>
+    <button class="mobile-tab-btn" data-tab="screen" type="button">
+      <span class="tab-icon">▶</span>Screen
+    </button>
+  </nav>
 
   <script src="js/api.js"></script>
   <script src="js/memory.js"></script>
