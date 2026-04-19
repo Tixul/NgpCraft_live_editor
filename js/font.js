@@ -32,3 +32,7 @@ const NGPC_Font = (() => {
 
   return { get, ASCII_MIN, ASCII_MAX };
 })();
+
+// Expose to globalThis so non-browser hosts (Node vm, Workers, electron) can
+// access this binding — top-level `const` is otherwise script-scoped.
+if (typeof globalThis !== 'undefined') globalThis.NGPC_Font = NGPC_Font;

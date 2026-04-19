@@ -137,6 +137,32 @@ const NGPC_Memory = (() => {
     [0x87E2, 'HW_GE_MODE — do not modify (K2GETechRef, leaves K2GE color mode)'],
   ]);
 
+  // DMA registers — TLCS-900/H DMA channels live in the 0x0080..0x009F I/O
+  // range plus the trigger vectors at 0x007C..0x007F. The live editor does
+  // NOT emulate DMA channels; writes here are silently absorbed by the I/O
+  // overlay. Flag the first write per address so the user knows their DMA
+  // setup compiles + executes in-editor but will behave differently on real
+  // hardware (where the actual transfer fires). See bugs_silicon.json
+  // ENCODE_LDC_ZZ_VALUES + the t900as.py DMA fixes for context.
+  const DMA_RANGES = [
+    [0x0030, 0x004F, 'DMA channel registers (DMACx/DMASx/DMADx/DMACTRL)'],
+    [0x007C, 0x007F, 'DMA interrupt vector registers (HW_DMA0V..HW_DMA3V)'],
+    [0x0080, 0x009F, 'DMA configuration / extended channel registers'],
+  ];
+  function checkDmaWrite(addr) {
+    if (hostMode) return;
+    for (const [lo, hi, label] of DMA_RANGES) {
+      if (addr >= lo && addr <= hi) {
+        warnOnce(`dma:${addr}`,
+          `[HW] DMA register write at 0x${addr.toString(16).padStart(4, '0')} — ` +
+          `${label}. The live editor does NOT emulate DMA; this code compiles + ` +
+          `runs in-editor but on real hardware the transfer fires (verify your ` +
+          `DMA setup against bugs_silicon.json ENCODE_LDC_ZZ_VALUES).`);
+        return;
+      }
+    }
+  }
+
   function checkReadOnlyWrite(addr) {
     if (hostMode) return;
     const reason = READ_ONLY_REGS.get(addr);
@@ -190,6 +216,7 @@ const NGPC_Memory = (() => {
     if (addr === 0x006F && (val & 0xFF) === 0x4E) stats.watchdogLastPet = 0;
     checkPaletteByteAccess(addr | 0, 'write');
     checkReadOnlyWrite(addr | 0);
+    checkDmaWrite(addr | 0);
     const [buf, off] = regionFor(addr);
     buf[off] = val & 0xFF;
   }
@@ -327,3 +354,7 @@ const NGPC_Memory = (() => {
     get RUNAWAY_LIMIT() { return RUNAWAY_LIMIT; },
   };
 })();
+
+// Expose to globalThis so non-browser hosts (Node vm, Workers, electron) can
+// access this binding — top-level `const` is otherwise script-scoped.
+if (typeof globalThis !== 'undefined') globalThis.NGPC_Memory = NGPC_Memory;

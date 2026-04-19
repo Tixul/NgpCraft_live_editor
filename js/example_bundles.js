@@ -22,3 +22,7 @@ const NGPC_EXAMPLE_BUNDLES = {
 }
 };
 
+
+// Expose to globalThis so non-browser hosts (Node vm, Workers, electron) can
+// access this binding — top-level `const` is otherwise script-scoped.
+if (typeof globalThis !== 'undefined') globalThis.NGPC_EXAMPLE_BUNDLES = NGPC_EXAMPLE_BUNDLES;

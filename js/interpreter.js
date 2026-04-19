@@ -806,6 +806,111 @@ const NGPC_Interp = (() => {
     }
   }
 
+  // HW-3c — Toshiba cc900 crash on `s8 != s8 || s8 != s8` chains.
+  //
+  // Hardware context: validated cc900 internal-error pattern (see NGPC bug DB
+  // entry CC900_S8_OR_NESTED_DECL). Two signed-byte inequality comparisons
+  // joined by `||` make the original Toshiba compiler crash. The JS interpreter
+  // accepts it; the user discovers the bug when migrating to cc900.
+  //
+  // Detection: heuristic — find a `||` whose two operands both look like
+  // `<expr> != <expr>` and at least one operand is parenthesised or short.
+  // Conservative regex (false negatives possible, false positives unlikely).
+  function lintS8OrChain(src, errors) {
+    const RE = /([A-Za-z_]\w*\s*!=\s*[^|;\n]{1,40})\|\|(\s*[A-Za-z_]\w*\s*!=\s*[^|;\n]{1,40})/g;
+    let m;
+    const seen = new Set();
+    while ((m = RE.exec(src)) !== null) {
+      const line = src.slice(0, m.index).split('\n').length;
+      const key = `HW-3c|${line}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      errors.push({
+        rule: 'HW-3c',
+        title: '`a != b || c != d` chain — Toshiba cc900 internal error',
+        lines: [`Line ${line}: ${m[0].slice(0, 80).replace(/\s+/g, ' ')}`],
+        why: 'Toshiba cc900 crashes on signed-byte inequality chains joined by ||. ' +
+             'The JS interpreter accepts it but the real compiler will fail.',
+        fix: 'Split into separate if statements, or cast operands to int: ' +
+             '`if (a != b) { ... } else if (c != d) { ... }`.',
+      });
+    }
+  }
+
+  // HW-3d (REMOVED) — Initialised declaration inside nested block.
+  //
+  // The original bug DB note (CC900_S8_OR_NESTED_DECL) was too vague. Pure
+  // depth >= 2 detection produces false positives on valid C89 like:
+  //
+  //     for (i = 0; i < N; i++) {
+  //         u16 c0 = src[i];        // VALID — at top of inner block
+  //         do_thing(c0);
+  //     }
+  //
+  // The actual cc900 issue is most likely "mixed declarations and statements"
+  // (decl after a non-decl statement in the same block = C99 extension), but
+  // we don't yet have a precise reproducer captured in the bug DB. Until then
+  // the rule stays out — false positives on flagship examples are worse than
+  // missing the case. To re-enable: capture an exact failing snippet on cc900,
+  // narrow the detection to that shape.
+
+  // HW-4 — Large static array declared inside a function (stack overflow risk).
+  //
+  // Hardware context: NGPC stack is small (~256 bytes typical, frame-overlay
+  // dependent). Declaring `static u8 buf[N]` inside a function with N > 256
+  // is fine on cc900 (static = file-scope BSS) but WITHOUT `static` the array
+  // lands on the stack and overflows on real hardware. Validated by Fix #23
+  // (s_bg_dma_phase_x[32][76] = 2432 bytes BSS eliminated saved 2400 stack
+  // bytes) — see bugs_silicon.json STACK_OVERFLOW_LARGE_BSS_LOCAL.
+  //
+  // Detection: any local (non-static) array `TYPE name[N]` declared inside a
+  // function body where N is a literal integer > 256 (rough threshold).
+  function lintLargeStackArray(src, errors) {
+    const PRIM = '(?:u8|u16|u32|s8|s16|s32|char|short|int|long)';
+    // Find `TYPE name[N]` not preceded by `static` on the same line.
+    const RE = new RegExp(
+      '(^|[^\\w])((?:const\\s+)?(?:unsigned\\s+|signed\\s+)?' + PRIM + ')\\s+(\\w+)\\s*\\[\\s*(\\d+)\\s*\\]',
+      'gm'
+    );
+    let m;
+    while ((m = RE.exec(src)) !== null) {
+      const N = parseInt(m[4], 10);
+      if (N <= 256) continue;
+      // Check this isn't a static / extern / typedef decl by looking at the
+      // line context — skip if any of those keywords appears on the same line
+      // before our match.
+      const lineStart = src.lastIndexOf('\n', m.index) + 1;
+      const lineEnd = src.indexOf('\n', m.index);
+      const line = src.slice(lineStart, lineEnd === -1 ? src.length : lineEnd);
+      if (/\b(?:static|extern|typedef)\b/.test(line.slice(0, m.index - lineStart))) continue;
+      // Walk back from the match position counting braces. Depth >= 1 = inside
+      // a function body. (Walk from m.index, not lineStart, so single-line code
+      // is handled correctly.)
+      let depth = 0;
+      for (let i = m.index - 1; i >= 0; i--) {
+        const c = src[i];
+        if (c === '}') depth--;
+        else if (c === '{') depth++;
+      }
+      if (depth < 1) continue;  // file scope — fine
+      const lineNum = src.slice(0, m.index).split('\n').length;
+      const bytesEstimate =
+        N * (m[2].includes('16') || m[2] === 'short' ? 2
+            : m[2].includes('32') || m[2] === 'long' ? 4
+            : 1);
+      errors.push({
+        rule: 'HW-4',
+        title: `large stack array — "${m[3]}[${N}]" (~${bytesEstimate} bytes)`,
+        lines: [`Line ${lineNum}: ${line.trim().slice(0, 80)}`],
+        why: 'NGPC stack is small (typically <512 bytes). A local array this size ' +
+             'will overflow the stack and corrupt return addresses on real hardware. ' +
+             'The JS interpreter has effectively unlimited stack so the bug is invisible here.',
+        fix: `Make it \`static ${m[2]} ${m[3]}[${N}]\` (file-scope BSS — costs zero stack), ` +
+             'or move the declaration to file scope.',
+      });
+    }
+  }
+
   // Strip cc900-specific qualifier keywords so the remaining passes don't
   // have to know about them. All are compile-time hints that don't affect
   // runtime semantics in a JS-transpiled emulator:
@@ -1813,6 +1918,11 @@ const NGPC_Interp = (() => {
     // HW-3b: `for (TYPE name = 0; …)` is C99. Runs on post-preproc source so
     // disabled #if branches don't trigger false positives.
     lintForDecl(out, hwErrors);
+    // HW-3c: cc900 crash on `s8 != s8 || s8 != s8` chains. Same context as HW-3b.
+    lintS8OrChain(out, hwErrors);
+    // HW-3d intentionally not called — see comment above its (now-stub) docstring.
+    // HW-4: large stack array — would overflow tiny NGPC stack on real hw.
+    lintLargeStackArray(out, hwErrors);
     const hasVsync = /\bngpc_vsync\b/.test(out) || /\bngpc_sleep\s*\(/.test(out);
     const userTypes = new Set([...TEMPLATE_TYPES, ...extractUserTypes(out)]);
     out = hoistFunctionStatics(out, userTypes);
@@ -1985,5 +2095,81 @@ const NGPC_Interp = (() => {
     }
   }
 
-  return { run, compile, REGISTERS };
+  // First-class headless entry point. Wraps run() so external callers
+  // (Workers, tests, MCP server, CI pipelines) don't have to reimplement the
+  // generator-driving + state-capture dance themselves.
+  //
+  // - Resets memory before each call so successive runs don't bleed state.
+  // - If main() uses ngpc_vsync(), iterates the generator up to `frames` ticks.
+  // - Returns a self-contained snapshot:
+  //     {
+  //       ok, kind, errors?, message?,
+  //       framesAdvanced, mainCompleted,
+  //       logs,
+  //       state: { bgColor, scr1OfsX/Y, scr2OfsX/Y },
+  //       framebuffer: { width, height, rgba: Uint8ClampedArray | null }
+  //     }
+  // `framebuffer.rgba` is populated only if vdp is available + captureFramebuffer != false.
+  function runFrames(code, opts = {}) {
+    const { frames = 60, captureFramebuffer = true, capturePsgEvents = false,
+            includeResolver, entry = 'main' } = opts;
+    const logs = [];
+    const Memory = (typeof NGPC_Memory !== 'undefined') ? NGPC_Memory : null;
+    const VDP    = (typeof NGPC_VDP    !== 'undefined') ? NGPC_VDP    : null;
+    const PSG    = (typeof NGPC_PSG    !== 'undefined') ? NGPC_PSG    : null;
+    if (Memory && typeof Memory.reset === 'function') Memory.reset();
+    if (PSG && capturePsgEvents && typeof PSG.getEvents === 'function') {
+      PSG.getEvents(true);  // drain any pre-existing events from prior runs
+    }
+    let result;
+    try {
+      result = run(code, { onLog: (m) => logs.push(m), entry, includeResolver });
+    } catch (err) {
+      if (err.name === 'HwFidelityError') {
+        return { ok: false, kind: 'hardware_fidelity', errors: err.hwErrors,
+                 formatted: err.message, logs };
+      }
+      return { ok: false, kind: 'transpile_or_runtime_error', message: err.message, logs };
+    }
+    let framesAdvanced = 0;
+    let mainCompleted = true;
+    if (result && typeof result === 'object' && typeof result.next === 'function') {
+      mainCompleted = false;
+      for (let i = 0; i < frames; i++) {
+        let step;
+        try { step = result.next(); }
+        catch (err) {
+          return { ok: false, kind: 'runtime_error_in_frame',
+                   frame: i, message: err.message, logs, framesAdvanced };
+        }
+        framesAdvanced++;
+        if (step.done) { mainCompleted = true; break; }
+      }
+    }
+    const state = {};
+    if (Memory && typeof Memory.read16 === 'function') {
+      try {
+        state.bgColor   = Memory.read16(0x83E0);
+        state.scr1OfsX  = Memory.read16(0x8030);
+        state.scr1OfsY  = Memory.read16(0x8032);
+        state.scr2OfsX  = Memory.read16(0x8034);
+        state.scr2OfsY  = Memory.read16(0x8036);
+      } catch {}
+    }
+    let framebuffer = null;
+    if (captureFramebuffer && VDP && typeof VDP.renderToPixels === 'function') {
+      framebuffer = { width: VDP.W, height: VDP.H, rgba: VDP.renderToPixels() };
+    }
+    let psgEvents = null;
+    if (capturePsgEvents && PSG && typeof PSG.getEvents === 'function') {
+      psgEvents = PSG.getEvents(true);
+    }
+    return { ok: true, framesAdvanced, mainCompleted, logs, state, framebuffer, psgEvents };
+  }
+
+  return { run, compile, runFrames, REGISTERS };
 })();
+
+// Expose to globalThis so non-browser hosts (Node vm, Workers, electron) can
+// access this binding — top-level `const` is otherwise script-scoped.
+if (typeof globalThis !== 'undefined') globalThis.NGPC_Interp = NGPC_Interp;

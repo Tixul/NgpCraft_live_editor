@@ -22,9 +22,11 @@ The API mirrors the NgpCraft template, so anything that runs in the editor is cl
 - **Autocomplete** — signatures + docstrings for the NgpCraft API (Ctrl+Space)
 - **Import / export** — JSON bundles or ZIP archives compatible with the template layout
 - **11 progressive examples** — from hello-world to a multi-file mini shmup, plus an audio test project
-- **Hardware-fidelity lint** — refuses to run code that would break on a real cart (missing `NGP_FAR` on ROM data, missing `volatile` on ISR-shared variables, C99 constructs the cc900 compiler rejects). Each error explains the hardware symptom and the fix.
-- **Hardware guardrails at runtime** — CPU budget, watchdog, sprite-line overflow, write-to-read-only warnings
-- **No dependencies** — pure HTML/CSS/JS, no build step, no npm, no server required
+- **Hardware-fidelity lint** — refuses to run code that would break on a real cart. Catches missing `NGP_FAR` on ROM data (HW-1), missing `volatile` on ISR-shared variables (HW-2), C99 for-decl that cc900 rejects (HW-3b), `s8 != s8 || s8 != s8` chains that crash cc900 (HW-3c), and large stack arrays that would overflow the NGPC stack (HW-4). Each error explains the hardware symptom and the fix.
+- **Hardware guardrails at runtime** — CPU budget, watchdog, sprite-line overflow, write-to-read-only warnings, DMA register write warnings (DMA isn't emulated; writes to DMA registers are flagged so you don't trust in-editor behaviour for that path).
+- **Headless API for tooling** — `NGPC_Interp.runFrames(code, opts)`, `NGPC_VDP.renderToPixels()`, `NGPC_AssetTools.decodePngFromBytes(bytes)`, and a structured PSG event log (`NGPC_PSG.getEvents`). Every module also exposes itself on `globalThis`, so external hosts (Node `vm`, Workers, electron, the NgpCraft MCP server) can drive the transpiler without a browser.
+- **Test suite** — `node --test tests/transpile.test.mjs` runs 22 fixtures covering smoke transpile, register rewrites, vsync→generator, every active lint rule, and the headless `runFrames` API. Zero external dependencies.
+- **No runtime dependencies** — pure HTML/CSS/JS, no build step, no npm, no server required
 
 ---
 
@@ -87,14 +89,18 @@ One quirk worth knowing: `int` is 2 bytes in the NGPC toolchain — matches cc90
 ```
 index.html          — three-pane shell
 js/
-  interpreter.js    — C → JS transpiler + hardware-fidelity lint
-  psg.js            — T6W28 PSG emulator (WebAudio)
-  vdp.js            — framebuffer renderer
+  interpreter.js    — C → JS transpiler + hardware-fidelity lint + runFrames() headless API
+  psg.js            — T6W28 PSG emulator (WebAudio) + structured event log
+  vdp.js            — framebuffer renderer (render / renderToPixels)
   runtime.js        — JS ports of NgpCraft runtime functions
-  asset_tools.js    — in-browser PNG → sprite / tilemap converter
+  asset_tools.js    — in-browser PNG → sprite / tilemap converter (decodePng / decodePngFromBytes)
+  api.js            — NGPC API constants + register table
+  memory.js         — emulated memory bus + hardware-budget tracking
   ...
 template/src/       — NgpCraft headers (read-only reference)
+tests/              — node --test fixture suite for the transpiler
 sync_template.py    — regenerate project_data.js after header changes
+CHANGELOG.md        — per-release notes
 ```
 
 ---

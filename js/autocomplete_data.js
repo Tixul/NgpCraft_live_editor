@@ -458,3 +458,7 @@ const NGPC_AUTOCOMPLETE = [
     signature: 'typedef struct { const MsprAnimFrame *anim; u8 frame_count; u8 current; u8 timer; u8 loop; } MsprAnimator',
     doc: 'Animation state machine used with ngpc_mspr_anim_*.' },
 ];
+
+// Expose to globalThis so non-browser hosts (Node vm, Workers, electron) can
+// access this binding — top-level `const` is otherwise script-scoped.
+if (typeof globalThis !== 'undefined') globalThis.NGPC_AUTOCOMPLETE = NGPC_AUTOCOMPLETE;

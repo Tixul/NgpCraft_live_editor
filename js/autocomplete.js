@@ -341,3 +341,7 @@ const NGPC_Autocomplete = (() => {
 
   return { attach, setEnabled, isEnabled };
 })();
+
+// Expose to globalThis so non-browser hosts (Node vm, Workers, electron) can
+// access this binding — top-level `const` is otherwise script-scoped.
+if (typeof globalThis !== 'undefined') globalThis.NGPC_Autocomplete = NGPC_Autocomplete;

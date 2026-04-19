@@ -100,3 +100,7 @@ const NGPC_FONT_DATA = {
   0x7E: "00000000000000001014401100000000",
   0x7F: "00004055405140404044405040514055",
 };
+
+// Expose to globalThis so non-browser hosts (Node vm, Workers, electron) can
+// access this binding — top-level `const` is otherwise script-scoped.
+if (typeof globalThis !== 'undefined') globalThis.NGPC_FONT_DATA = NGPC_FONT_DATA;

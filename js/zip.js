@@ -217,3 +217,7 @@ const NGPC_Zip = (() => {
 
   return { encode, decode, crc32 };
 })();
+
+// Expose to globalThis so non-browser hosts (Node vm, Workers, electron) can
+// access this binding — top-level `const` is otherwise script-scoped.
+if (typeof globalThis !== 'undefined') globalThis.NGPC_Zip = NGPC_Zip;

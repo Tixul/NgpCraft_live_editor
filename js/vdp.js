@@ -163,9 +163,26 @@ const NGPC_VDP = (() => {
     }
   }
 
+  // Pure-pixel renderer — returns a Uint8ClampedArray of W*H*4 RGBA bytes.
+  // No DOM / no canvas dependency. Use this from headless hosts (Node, Workers,
+  // tests) and from `render(ctx)` below as the single source of truth.
+  function renderToPixels() {
+    const fb = new Uint8ClampedArray(W * H * 4);
+    renderInto(fb);
+    return fb;
+  }
+
+  // Browser-facing canvas renderer — thin adapter around renderToPixels().
   function render(canvasCtx) {
     const img = canvasCtx.createImageData(W, H);
-    const fb = img.data;
+    renderInto(img.data);
+    canvasCtx.putImageData(img, 0, 0);
+  }
+
+  // The actual pixel-painting work lives here so both renderToPixels() and
+  // render(ctx) share the same implementation. `fb` is any RGBA byte buffer
+  // of length W*H*4 (Uint8ClampedArray or compatible).
+  function renderInto(fb) {
 
     // Background: only displayed when HW_BG_CTL (0x8118) bit7 = 1 per
     // HW_REGISTERS.md §5.3. Otherwise fall back to black.
@@ -316,9 +333,11 @@ const NGPC_VDP = (() => {
         fb[i + 2] = 255 - fb[i + 2];
       }
     }
-
-    canvasCtx.putImageData(img, 0, 0);
   }
 
-  return { render, W, H };
+  return { render, renderToPixels, W, H };
 })();
+
+// Expose to globalThis so non-browser hosts (Node vm, Workers, electron) can
+// access this binding — top-level `const` is otherwise script-scoped.
+if (typeof globalThis !== 'undefined') globalThis.NGPC_VDP = NGPC_VDP;

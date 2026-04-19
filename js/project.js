@@ -276,3 +276,7 @@ const NGPC_Project = (() => {
     serialize, importBundle,
   };
 })();
+
+// Expose to globalThis so non-browser hosts (Node vm, Workers, electron) can
+// access this binding — top-level `const` is otherwise script-scoped.
+if (typeof globalThis !== 'undefined') globalThis.NGPC_Project = NGPC_Project;

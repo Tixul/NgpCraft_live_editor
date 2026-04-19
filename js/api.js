@@ -93,3 +93,7 @@ const NGPC_API = {
   // `func(NULL)`) compares against 0 as expected.
   NULL: 0,
 };
+
+// Expose to globalThis so non-browser hosts (Node vm, Workers, electron) can
+// access this binding — top-level `const` is otherwise script-scoped.
+if (typeof globalThis !== 'undefined') globalThis.NGPC_API = NGPC_API;

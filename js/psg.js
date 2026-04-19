@@ -147,8 +147,11 @@ const NGPC_PSG = (() => {
 
   // Allocate the AudioContext. Safe to call before user gesture — sound
   // stays silent until `resume()` is invoked from a user-triggered handler.
+  // Guarded against non-browser hosts (Node tests, Workers without window) —
+  // the PSG state model still updates so headless callers can introspect it.
   function init() {
     if (ctx) return;
+    if (typeof window === 'undefined') return;
     const AC = window.AudioContext || window.webkitAudioContext;
     if (!AC) return;  // no WebAudio → PSG model still updates for tests
     ctx = new AC();
@@ -166,11 +169,33 @@ const NGPC_PSG = (() => {
     return !!(ctx && ctx.state === 'running');
   }
 
+  // Diagnostic event log — every state-changing call appends a structured
+  // entry. Independent of WebAudio: a Node host introspects this to answer
+  // questions like "at what frame did channel 0 go silent?" without ever
+  // creating an audio context. `setEventSink(fn)` streams events live.
+  // `getEvents(clear=true)` drains the buffer.
+  const events = [];
+  let eventSink = null;
+  let eventBudget = 4096;  // ring-buffer cap so a runaway loop doesn't OOM
+  function emit(evt) {
+    if (events.length >= eventBudget) events.shift();
+    events.push(evt);
+    if (eventSink) try { eventSink(evt); } catch (_) {}
+  }
+  function setEventSink(fn) { eventSink = fn; }
+  function setEventBudget(n) { eventBudget = Math.max(1, n | 0); }
+  function getEvents(clear = true) {
+    const out = events.slice();
+    if (clear) events.length = 0;
+    return out;
+  }
+
   function setTone(ch, divider) {
     if (ch < 0 || ch > 2) return;
     const v = voices[TONE_ORDER[ch]];
     v.divider = Math.max(1, Math.min(1023, divider | 0));
     applyTone(ch);
+    emit({ type: 'tone', ch, divider: v.divider, freq: PSG_CLOCK / v.divider });
   }
 
   function setAttn(ch, attn) {
@@ -178,21 +203,25 @@ const NGPC_PSG = (() => {
     if (ch === 3) {
       voices.noise.attn = a;
       applyNoise();
+      emit({ type: 'attn', ch: 3, voice: 'noise', attn: a, silent: a >= 15 });
     } else if (ch >= 0 && ch <= 2) {
       voices[TONE_ORDER[ch]].attn = a;
       applyTone(ch);
+      emit({ type: 'attn', ch, voice: TONE_ORDER[ch], attn: a, silent: a >= 15 });
     }
   }
 
   function setNoise(ctrl) {
     voices.noise.ctrl = ctrl & 0xFF;
     applyNoise();
+    emit({ type: 'noise', ctrl: voices.noise.ctrl, white: !!(ctrl & 4) });
   }
 
   // Silence all voices without tearing down the graph.
   function reset() {
     for (let ch = 0; ch < 3; ch++) setAttn(ch, 15);
     setAttn(3, 15);
+    emit({ type: 'reset' });
   }
 
   // Expose the voice model for tests + debugging.
@@ -211,8 +240,14 @@ const NGPC_PSG = (() => {
     init, resume, isUnlocked,
     setTone, setAttn, setNoise, reset,
     getState,
+    // Diagnostic event log (headless / Node / MCP / tests).
+    getEvents, setEventSink, setEventBudget,
     // Helper for callers who only know the note index → divider table.
     PSG_CLOCK,
     attnToGain,
   };
 })();
+
+// Expose to globalThis so non-browser hosts (Node vm, Workers, electron) can
+// access this binding — top-level `const` is otherwise script-scoped.
+if (typeof globalThis !== 'undefined') globalThis.NGPC_PSG = NGPC_PSG;

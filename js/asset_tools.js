@@ -601,7 +601,7 @@ const NGPC_AssetTools = (() => {
     return out.join('\n');
   }
 
-  // Async helper: turn a File object into { data, width, height } by
+  // Async helper: turn a File OR Blob into { data, width, height } by
   // drawing the PNG onto a hidden canvas and reading its ImageData.
   async function decodePng(file) {
     const url = URL.createObjectURL(file);
@@ -623,10 +623,31 @@ const NGPC_AssetTools = (() => {
     }
   }
 
+  // Sibling entry that accepts raw bytes (ArrayBuffer / Uint8Array) instead of
+  // a File. Useful from Web Workers (no File object on hand), from extensions
+  // that already have the bytes in memory, and from any non-browser host that
+  // can polyfill Blob + URL + Image (or, more realistically, swap the whole
+  // function via its own decoder — see the MCP server's _png_decode.js for a
+  // pure-pngjs alternative used in Node).
+  async function decodePngFromBytes(bytes) {
+    if (typeof Blob === 'undefined') {
+      throw new Error(
+        'decodePngFromBytes requires Blob (browser/Worker only). ' +
+        'In Node, decode the PNG with pngjs and call exportSprite/exportTilemap directly.');
+    }
+    const buf = bytes instanceof ArrayBuffer ? bytes : bytes.buffer ?? bytes;
+    return decodePng(new Blob([buf], { type: 'image/png' }));
+  }
+
   return {
     decodePng,
+    decodePngFromBytes,
     exportSprite,
     exportTilemap,
     sanitizeCIdentifier,
   };
 })();
+
+// Expose to globalThis so non-browser hosts (Node vm, Workers, electron) can
+// access this binding — top-level `const` is otherwise script-scoped.
+if (typeof globalThis !== 'undefined') globalThis.NGPC_AssetTools = NGPC_AssetTools;

@@ -197,3 +197,7 @@ const NGPC_PngImport = (() => {
 
   return { open };
 })();
+
+// Expose to globalThis so non-browser hosts (Node vm, Workers, electron) can
+// access this binding — top-level `const` is otherwise script-scoped.
+if (typeof globalThis !== 'undefined') globalThis.NGPC_PngImport = NGPC_PngImport;

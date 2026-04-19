@@ -199,10 +199,23 @@ Current rules:
   never terminates.
 - **HW-3b — loop variable declared inside `for (…)`**: C99 extension, cc900
   is C89 strict. Declare the loop variable at block start.
+- **HW-3c — `s8 != s8 || s8 != s8` chain**: signed-byte inequality chains
+  joined by `||` crash the Toshiba cc900 compiler. Split into separate
+  `if` statements or cast operands to `int`.
+- **HW-4 — large stack array**: a non-static, non-extern in-function array
+  whose declared size exceeds 256 bytes. The NGPC stack is small (~512 bytes
+  typical); larger locals overflow and corrupt return addresses on real
+  silicon. Add `static` (move to BSS) or hoist to file scope.
 
 A violation throws a `HwFidelityError` which the editor logs under the
-`err` filter. All 9 bundled examples and the shmup bundle compile clean
+`err` filter. All bundled examples and the shmup bundle compile clean
 against these rules.
+
+In addition to the lint, the runtime emits a one-shot warning whenever
+the user code writes to a TLCS-900 DMA register (0x0030..0x004F /
+0x007C..0x007F / 0x0080..0x009F): the editor does not emulate DMA, so the
+write is absorbed silently — but real hardware fires the transfer. The
+warning makes that asymmetry visible.
 
 ## Performance notes
 
@@ -252,10 +265,11 @@ Top level:
 
 - `index.html`: main UI shell and script loading order.
 - `style.css`: application styling.
-- `README.md` / `DOC.md`: user-facing and technical docs.
+- `README.md` / `DOC.md` / `CHANGELOG.md`: user-facing docs and per-release notes.
 - `sync_template.py`: rebuilds `js/project_data.js` from `template/`.
 - `sync_font.py`: rebuilds `js/font_data.js`.
-- `validate_transpile.py`: offline transpile smoke test.
+- `validate_transpile.py`: offline Python transpile smoke test.
+- `tests/`: `node --test` fixture suite for the transpiler (see `tests/README.md`).
 
 Runtime and UI:
 
@@ -302,11 +316,45 @@ After changing the baked font inputs or parameters:
 python sync_font.py
 ```
 
-To run a quick offline transpile smoke test:
+To run a quick offline Python transpile smoke test:
 
 ```bash
 python validate_transpile.py
 ```
+
+To run the JS fixture suite (Node 20+, no external deps):
+
+```bash
+node --test tests/transpile.test.mjs
+```
+
+## Headless API
+
+Every module is exposed on `globalThis`, so non-browser hosts (Node `vm`,
+Workers, electron, the NgpCraft MCP server) can drive the transpiler without
+loading `index.html`. The recommended entry point is:
+
+```js
+NGPC_Interp.runFrames(code, {
+  frames: 60,                 // generator iterations to advance (vsync ticks)
+  captureFramebuffer: true,   // include RGBA bytes in the result
+  capturePsgEvents: true,     // include the PSG event log
+});
+// → { ok, kind, errors?, framesAdvanced, mainCompleted, logs,
+//     state, framebuffer, psgEvents }
+```
+
+Other useful headless entry points:
+
+- `NGPC_VDP.renderToPixels()` — `Uint8ClampedArray` of `W*H*4` RGBA bytes,
+  no canvas required.
+- `NGPC_AssetTools.decodePngFromBytes(bytes)` — decode an `ArrayBuffer` /
+  `Uint8Array` instead of a `File` (browser/Worker; Node hosts should use
+  `pngjs` directly and call `exportSprite`/`exportTilemap` with the result).
+- `NGPC_PSG.getEvents(clear=true)` — drain the structured PSG event log
+  (`{type, ch, divider, freq, attn, silent, ctrl, white}` entries).
+  `setEventSink(fn)` streams events live; `setEventBudget(n)` sizes the
+  ring buffer (default 4096).
 
 ## Maintenance note
 
