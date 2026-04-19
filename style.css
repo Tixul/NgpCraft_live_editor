@@ -117,7 +117,7 @@ main {
 }
 .tree-row:hover .tree-delete { opacity: 1; }
 .tree-row .tree-delete:hover { color: #f48771; }
-@media (max-width: 1023px) {
+@media (max-width: 1023px) and (pointer: coarse) {
   .tree-row .tree-delete { opacity: 1; }
 }
 
@@ -820,7 +820,7 @@ main {
 /* ---- Mobile tab bar ---- */
 .mobile-tabbar { display: none; }
 
-@media (max-width: 1023px) {
+@media (max-width: 1023px) and (pointer: coarse) {
   /* Hide banner, shrink header */
   .top-banner { display: none; }
   header h1   { display: none; }
@@ -895,23 +895,24 @@ main {
   body[data-mobile-tab="screen"] .screen-pane {
     overflow-y: auto;
   }
+  /* Apply aspect-ratio to the WRAPPER, not the canvas. Canvas fills 100%
+     of the wrapper so its display size matches the 160×152 ratio exactly. */
   body[data-mobile-tab="screen"] .screen-wrap {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    height: 55vh;
-    min-height: 240px;
+    display: block;
     flex-shrink: 0;
-    padding: 4px;
+    width: min(100%, calc(55vh * 160 / 152));
+    aspect-ratio: 160 / 152;
+    margin: 4px auto;
+    padding: 0;
   }
   body[data-mobile-tab="screen"] #screen {
-    width: auto !important;
-    height: auto !important;
-    max-width: 100%;
-    max-height: 100%;
-    aspect-ratio: 160 / 152;
+    display: block;
+    width: 100% !important;
+    height: 100% !important;
     image-rendering: pixelated;
   }
+  /* Zoom selector useless on mobile — canvas fills responsively. */
+  .screen-toolbar-zoom { display: none; }
   /* Log and debug panels compact below canvas */
   body[data-mobile-tab="screen"] #log { max-height: 80px; }
   body[data-mobile-tab="screen"] .debug-panel,
@@ -1030,40 +1031,35 @@ main {
   }
 }
 
-/* ---- Landscape mobile: tab bar on the left, canvas fills height ---- */
-@media (max-width: 1023px) and (orientation: landscape) {
-  /* Tab bar vertical, left side */
+/* ---- Landscape mobile: tab bar at the TOP (bottom is joypad territory) ---- */
+@media (max-width: 1023px) and (pointer: coarse) and (orientation: landscape) {
+  /* Move tab bar from bottom to top */
   .mobile-tabbar {
-    flex-direction: column;
-    top: 0; left: 0; right: auto; bottom: 0;
-    width: 56px;
-    height: 100%;
+    top: 0; bottom: auto;
+    height: 40px;
     border-top: none;
-    border-right: 2px solid #333;
+    border-bottom: 2px solid #333;
   }
-  .mobile-tab-btn {
-    border-top: none;
-    border-left: 3px solid transparent;
-  }
-  .mobile-tab-btn.active {
-    border-top-color: transparent;
-    border-left-color: #9cdcfe;
-  }
+  .mobile-tab-btn { font-size: 0.65rem; }
+  .mobile-tab-btn .tab-icon { font-size: 0.9rem; }
 
-  /* Main content shifts right of the tab bar */
+  /* Main content shifts below the top tab bar (no bottom padding) */
   main {
     padding-bottom: 0;
-    padding-left: 56px;
+    padding-top: 40px;
   }
 
-  /* Joypad overlay uses full viewport bottom (no horizontal tab bar) */
-  .joypad-overlay { bottom: 0; left: 56px; }
+  /* Header already hidden visually on mobile — compact further */
+  header { padding: 0.2rem 0.5rem; }
 
-  /* Canvas uses most of the height, aspect-locked */
+  /* Joypad overlay uses full viewport bottom */
+  .joypad-overlay { bottom: 0; }
+
+  /* Canvas uses most of the height in landscape */
   body[data-mobile-tab="screen"] .screen-wrap {
-    height: 85vh;
+    width: min(100%, calc(75vh * 160 / 152));
   }
 
-  /* Leave room for the joypad at the bottom */
-  body[data-mobile-tab="screen"] .screen-pane::after { height: 140px; }
+  /* Less bottom padding needed (no tab bar below) */
+  body[data-mobile-tab="screen"] .screen-pane::after { height: 160px; }
 }
