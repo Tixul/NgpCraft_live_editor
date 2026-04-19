@@ -895,20 +895,24 @@ main {
   body[data-mobile-tab="screen"] .screen-pane {
     overflow-y: auto;
   }
-  /* Apply aspect-ratio to the WRAPPER, not the canvas. Canvas fills 100%
-     of the wrapper so its display size matches the 160×152 ratio exactly. */
+  /* Canvas: compute both width AND height explicitly from the same formula,
+     guarantees exact 160/152 ratio regardless of browser quirks. */
   body[data-mobile-tab="screen"] .screen-wrap {
-    display: block;
+    display: flex !important;
+    align-items: center;
+    justify-content: center;
     flex-shrink: 0;
-    width: min(100%, calc(55vh * 160 / 152));
-    aspect-ratio: 160 / 152;
-    margin: 4px auto;
-    padding: 0;
+    flex: 0 0 auto;
+    padding: 4px;
+    min-height: 0;
   }
   body[data-mobile-tab="screen"] #screen {
     display: block;
-    width: 100% !important;
-    height: 100% !important;
+    width:  min(100vw - 16px, calc(55vh * 160 / 152)) !important;
+    height: calc(min(100vw - 16px, calc(55vh * 160 / 152)) * 152 / 160) !important;
+    max-width: none !important;
+    max-height: none !important;
+    border: none !important;
     image-rendering: pixelated;
   }
   /* Zoom selector useless on mobile — canvas fills responsively. */
@@ -1031,35 +1035,41 @@ main {
   }
 }
 
-/* ---- Landscape mobile: tab bar at the TOP (bottom is joypad territory) ---- */
+/* ---- Landscape mobile: tab bar on the LEFT, joypad on the right half ---- */
 @media (max-width: 1023px) and (pointer: coarse) and (orientation: landscape) {
-  /* Move tab bar from bottom to top */
+  /* Tab bar vertical, left side */
   .mobile-tabbar {
-    top: 0; bottom: auto;
-    height: 40px;
+    flex-direction: column;
+    top: 0; left: 0; bottom: 0; right: auto;
+    width: 56px;
+    height: 100%;
     border-top: none;
-    border-bottom: 2px solid #333;
+    border-right: 2px solid #333;
   }
-  .mobile-tab-btn { font-size: 0.65rem; }
-  .mobile-tab-btn .tab-icon { font-size: 0.9rem; }
+  .mobile-tab-btn {
+    border-top: none;
+    border-left: 3px solid transparent;
+  }
+  .mobile-tab-btn.active {
+    border-top-color: transparent;
+    border-left-color: #9cdcfe;
+  }
 
-  /* Main content shifts below the top tab bar (no bottom padding) */
+  /* Main content shifts right of the tab bar, no bottom padding */
   main {
     padding-bottom: 0;
-    padding-top: 40px;
+    padding-left: 56px;
   }
 
-  /* Header already hidden visually on mobile — compact further */
-  header { padding: 0.2rem 0.5rem; }
+  /* Joypad overlay aligned right of the tab bar, full height bottom */
+  .joypad-overlay { bottom: 0; left: 56px; }
 
-  /* Joypad overlay uses full viewport bottom */
-  .joypad-overlay { bottom: 0; }
-
-  /* Canvas uses most of the height in landscape */
-  body[data-mobile-tab="screen"] .screen-wrap {
-    width: min(100%, calc(75vh * 160 / 152));
+  /* Canvas in landscape: use most of the vertical space */
+  body[data-mobile-tab="screen"] #screen {
+    width:  min(calc(100vw - 72px), calc(75vh * 160 / 152)) !important;
+    height: calc(min(calc(100vw - 72px), calc(75vh * 160 / 152)) * 152 / 160) !important;
   }
 
-  /* Less bottom padding needed (no tab bar below) */
+  /* Less bottom padding needed in landscape */
   body[data-mobile-tab="screen"] .screen-pane::after { height: 160px; }
 }
