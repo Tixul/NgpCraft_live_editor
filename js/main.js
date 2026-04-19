@@ -37,6 +37,30 @@
   // viewport, etc.) — same sink so the student sees them in-editor.
   NGPC_Memory.setHwWarnSink((msg) => log(msg, 'err'));
 
+  // AudioContext unlock. Browsers refuse to start audio until the page
+  // receives a user gesture (click / keydown / touch). We attach once-off
+  // listeners that call `NGPC_PSG.resume()` on the first such event, then
+  // detach themselves. A hint in the log tells the user what to do if the
+  // page boots silent. Safe if NGPC_PSG wasn't loaded (e.g. headless tests).
+  if (typeof NGPC_PSG !== 'undefined') {
+    NGPC_PSG.init();
+    let audioUnlocked = NGPC_PSG.isUnlocked();
+    if (!audioUnlocked) log('[audio] Click the canvas (or press a key) to enable sound.', 'info');
+    const unlockAudio = () => {
+      NGPC_PSG.resume();
+      if (NGPC_PSG.isUnlocked()) {
+        audioUnlocked = true;
+        log('[audio] Sound enabled.', 'info');
+        window.removeEventListener('click', unlockAudio, true);
+        window.removeEventListener('keydown', unlockAudio, true);
+        window.removeEventListener('touchstart', unlockAudio, true);
+      }
+    };
+    window.addEventListener('click',      unlockAudio, true);
+    window.addEventListener('keydown',    unlockAudio, true);
+    window.addEventListener('touchstart', unlockAudio, true);
+  }
+
   // ---- Debug panel (CPU / watchdog / sprite character-over) -------------
   const cpuFillEl    = document.getElementById('cpu-fill');
   const cpuValueEl   = document.getElementById('cpu-value');

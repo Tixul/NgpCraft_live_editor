@@ -656,4 +656,118 @@ void main(void)
     label: '10 - StarGunner mini shmup (multi-file)',
     bundle: NGPC_EXAMPLE_BUNDLES.stargunnerMiniShmup,
   },
+
+  {
+    id: 'audio-test',
+    label: '11 - Audio test (tone + noise + BGM)',
+    body: `/*
+ * Audio test: exercise the T6W28 PSG emulator (3 tones + 1 noise) through
+ * the template audio API.
+ *
+ * Controls (click the canvas first for keyboard focus):
+ *   A        : play a tone on channel 0 at the current note
+ *   B        : play a noise burst (white noise, 30 frames)
+ *   OPTION   : toggle the built-in BGM loop
+ *   UP/DOWN  : cycle through 8 notes (C4 ... C5)
+ *   LEFT/RIGHT : change tone duration (10 / 30 / 60 / 120 frames)
+ *
+ * What to listen for:
+ *   - Pressing A at different notes should give distinct pitches.
+ *   - Noise burst is a hiss, same duration each time.
+ *   - BGM plays 4 bars on tone 1, rests on tones 2/3, drum on noise.
+ */
+
+#include "ngpc_sys.h"
+#include "ngpc_gfx.h"
+#include "ngpc_text.h"
+#include "ngpc_input.h"
+
+/* Dividers for 8 notes C4..C5 (equal temperament, 96 kHz / Hz). */
+const u16 NGP_FAR s_notes[8] = {
+    367, 327, 291, 275, 245, 218, 194, 184
+};
+const char *s_note_names[8] = {
+    "C4", "D4", "E4", "F4", "G4", "A4", "B4", "C5"
+};
+const u16 s_durations[4] = { 10, 30, 60, 120 };
+
+/* Tiny BGM — 4 tone-0 notes with REST between. Loop back to byte 0.
+ * Format: byte in [1..51] = note index; 0xFF = REST; 0x00 = END. */
+const u8 NGP_FAR s_bgm_ch0[] = {
+    27, 0xFF, 29, 0xFF, 31, 0xFF, 32, 0xFF,
+    34, 0xFF, 32, 0xFF, 31, 0xFF, 29, 0xFF,
+    0x00
+};
+const u8 NGP_FAR s_bgm_ch1[] = { 0xFF, 0xFF, 0xFF, 0xFF, 0x00 };
+const u8 NGP_FAR s_bgm_ch2[] = { 0xFF, 0xFF, 0xFF, 0xFF, 0x00 };
+/* Noise channel: byte 1..8 = noise ctrl. 4 = white/H-rate, 1 = periodic/M. */
+const u8 NGP_FAR s_bgm_chn[] = {
+    4, 0xFF, 0xFF, 0xFF, 1, 0xFF, 0xFF, 0xFF, 0x00
+};
+
+void main(void)
+{
+    u8 note_idx = 5;   /* start at A4 */
+    u8 dur_idx  = 1;   /* 30 frames */
+    u8 bgm_on   = 0;
+
+    ngpc_init();
+    ngpc_load_sysfont();
+    Sounds_Init();
+
+    ngpc_gfx_set_bg_color(RGB(0, 0, 4));
+    ngpc_gfx_set_palette(GFX_SCR1, 0,
+                         RGB(0, 0, 0), RGB(15, 15, 15),
+                         RGB(0, 15, 15), RGB(15, 15, 0));
+    ngpc_gfx_clear(GFX_SCR1);
+
+    ngpc_text_print(GFX_SCR1, 0, 1,  1, "AUDIO TEST");
+    ngpc_text_print(GFX_SCR1, 0, 1,  3, "A     : tone ch0");
+    ngpc_text_print(GFX_SCR1, 0, 1,  4, "B     : noise burst");
+    ngpc_text_print(GFX_SCR1, 0, 1,  5, "OPT   : BGM toggle");
+    ngpc_text_print(GFX_SCR1, 0, 1,  6, "UP/DN : note");
+    ngpc_text_print(GFX_SCR1, 0, 1,  7, "LF/RT : duration");
+
+    ngpc_text_print(GFX_SCR1, 0, 1, 10, "NOTE  :");
+    ngpc_text_print(GFX_SCR1, 0, 1, 11, "DURAT :");
+    ngpc_text_print(GFX_SCR1, 0, 1, 12, "BGM   :");
+
+    while (1) {
+        ngpc_vsync();
+        ngpc_input_update();
+        Sounds_Update();   /* ticks SFX timers + BGM pointers */
+
+        if (ngpc_pad_pressed & PAD_UP)    note_idx = (note_idx + 1) & 7;
+        if (ngpc_pad_pressed & PAD_DOWN)  note_idx = (note_idx + 7) & 7;
+        if (ngpc_pad_pressed & PAD_RIGHT) dur_idx  = (dur_idx  + 1) & 3;
+        if (ngpc_pad_pressed & PAD_LEFT)  dur_idx  = (dur_idx  + 3) & 3;
+
+        if (ngpc_pad_pressed & PAD_A) {
+            /* ch=0, divider from table, attn=0 (loudest), duration in frames */
+            Sfx_PlayToneCh(0, s_notes[note_idx], 0, s_durations[dur_idx]);
+        }
+        if (ngpc_pad_pressed & PAD_B) {
+            /* rate=0 (fastest), type=1 (white), attn=2, 30 frames */
+            Sfx_PlayNoiseEx(0, 1, 2, 30, 0, 0, 0, 0, 0);
+        }
+        if (ngpc_pad_pressed & PAD_OPTION) {
+            if (bgm_on) {
+                Bgm_Stop();
+                bgm_on = 0;
+            } else {
+                /* StartLoop4Ex with all four channels + loop-back offsets = 0
+                 * means the streams restart from the top on END. */
+                Bgm_StartLoop4Ex(s_bgm_ch0, 0, s_bgm_ch1, 0,
+                                 s_bgm_ch2, 0, s_bgm_chn, 0);
+                bgm_on = 1;
+            }
+        }
+
+        ngpc_text_print(GFX_SCR1, 0, 9, 10, s_note_names[note_idx]);
+        ngpc_text_print_dec(GFX_SCR1, 0, 9, 11, s_durations[dur_idx], 3);
+        ngpc_text_print(GFX_SCR1, 0, 9, 12, bgm_on ? "ON " : "off");
+    }
+}
+`,
+  },
 ];

@@ -1026,60 +1026,461 @@ const NGPC_Runtime = (() => {
   function ngpc_vramq_dropped()    { return s_vramq_dropped; }
   function ngpc_vramq_clear_dropped() { s_vramq_dropped = 0; }
 
-  // ---- Sound API stubs (sounds.h + audio/sfx_ids.h) --------------------
+  // ---- Sound API (sounds.h) --------------------------------------------
   //
-  // Real hardware uses the SN76489-family PSG driven by the Z80 coprocessor;
-  // emulating it would need a full DSP. The runtime instead stubs every
-  // template API as a no-op and routes `Sfx_Play` / `Bgm_Start*` through
-  // the host log so the student sees which SFX/BGM would fire on real hw.
-  // Signatures match Fini/StarGunner/src/audio/sounds.h verbatim so
-  // template-tracking projects link (or in our case, transpile) without
-  // touching call sites.
-  function Sounds_Init()               { hostLog('[audio] Sounds_Init (stub)'); }
-  function Sounds_ResetState()         { /* no-op */ }
-  function Sounds_Update()             { /* no-op */ }
-  function Sounds_DebugFault()         { return 0; }
-  function Sounds_DebugDrops()         { return 0; }
-  function Sounds_DebugLastSfx()       { return 0; }
-  function Sfx_Update()                { /* no-op */ }
-  function Sfx_Play(id)                { hostLog(`[sfx] play id=${id & 0xFF}`); }
+  // Real hardware: T6W28 PSG (3 tones + 1 noise), driven by the Z80
+  // coprocessor. The live editor emulates the PSG directly via WebAudio
+  // (js/psg.js = NGPC_PSG) and hooks the Sfx_* / Bgm_* high-level API
+  // straight into setTone / setAttn / setNoise. The Z80 is NOT emulated —
+  // we intercept above the byte protocol.
+  //
+  // SFX engine — mirrors the template driver's per-frame modulation:
+  //   - Pitch sweep: divider walks `sw_step * sw_dir` every `sw_speed` frames
+  //     toward `sw_end`. If `sw_ping`, bounce between base and end; else
+  //     stop when reaching the endpoint.
+  //   - Envelope: attenuation increments by `env_step` every `env_spd`
+  //     frames (0 = loud, 15 = silent → natural decay).
+  //   - Frame timer: when it hits zero, voice is silenced.
+  // State blocks are allocated per channel (0..2 = tones, 3 = noise).
+  const psg = () => (typeof NGPC_PSG !== 'undefined') ? NGPC_PSG : null;
+  const sfxTone = [0, 1, 2].map(() => ({
+    timer: 0, attn: 15, div: 1023,
+    sw_on: 0, sw_step: 0, sw_speed: 1, sw_counter: 0,
+    sw_end: 0, sw_base: 0, sw_ping: 0, sw_dir: 1,
+    env_on: 0, env_step: 0, env_spd: 1, env_counter: 0,
+  }));
+  const sfxNoise = {
+    timer: 0, attn: 15,
+    env_on: 0, env_step: 0, env_spd: 1, env_counter: 0,
+    burst: 0, burst_dur: 0, burst_counter: 0, burst_ctrl: 0,
+  };
+  const sfxTimer = [0, 0, 0, 0];  // compat view for Sounds_ResetState etc.
+
+  function Sounds_Init() {
+    hostLog('[audio] Sounds_Init');
+    const p = psg();
+    if (p) p.init();
+  }
+  function Sounds_ResetState() {
+    for (const s of sfxTone) { s.timer = 0; s.sw_on = 0; s.env_on = 0; s.attn = 15; }
+    sfxNoise.timer = 0; sfxNoise.env_on = 0; sfxNoise.attn = 15;
+    for (let i = 0; i < 4; i++) sfxTimer[i] = 0;
+    const p = psg();
+    if (p) p.reset();
+  }
+  function Sounds_Update() {
+    // Sfx timers tick down first (matches template order: SFX then BGM).
+    Sfx_Update();
+    Bgm_Update();
+  }
+  function Sounds_DebugFault()   { return 0; }
+  function Sounds_DebugDrops()   { return 0; }
+  function Sounds_DebugLastSfx() { return 0; }
+  function _sfxToneTick(ch) {
+    const s = sfxTone[ch];
+    if (s.timer <= 0) return;
+    const p = psg();
+    let dirty = false;
+    // Pitch sweep — walks `div` toward `sw_end` by `sw_step` per `sw_speed`.
+    if (s.sw_on) {
+      if (s.sw_counter <= 0) {
+        let v = s.div + s.sw_step * s.sw_dir;
+        if (s.sw_ping) {
+          const lo = Math.min(s.sw_base, s.sw_end);
+          const hi = Math.max(s.sw_base, s.sw_end);
+          if      (v <= lo) { v = lo; s.sw_dir = +1; }
+          else if (v >= hi) { v = hi; s.sw_dir = -1; }
+        } else {
+          if (s.sw_dir < 0 && v <= s.sw_end) { v = s.sw_end; s.sw_on = 0; }
+          else if (s.sw_dir > 0 && v >= s.sw_end) { v = s.sw_end; s.sw_on = 0; }
+        }
+        if (v < 1)    v = 1;
+        if (v > 1023) v = 1023;
+        s.div = v;
+        s.sw_counter = s.sw_speed;
+        dirty = true;
+      } else {
+        s.sw_counter--;
+      }
+    }
+    // Attenuation envelope — increments attn toward 15 (silence) per env_spd.
+    if (s.env_on) {
+      if (s.env_counter <= 0) {
+        if (s.attn < 15) {
+          s.attn = Math.min(15, s.attn + s.env_step);
+          dirty = true;
+        }
+        s.env_counter = s.env_spd;
+      } else {
+        s.env_counter--;
+      }
+    }
+    if (dirty && p) { p.setTone(ch, s.div); p.setAttn(ch, s.attn); }
+    s.timer--;
+    if (s.timer === 0 && p) { p.setAttn(ch, 15); s.sw_on = 0; s.env_on = 0; }
+  }
+  function _sfxNoiseTick() {
+    const s = sfxNoise;
+    if (s.timer <= 0) return;
+    const p = psg();
+    let dirty = false;
+    if (s.env_on) {
+      if (s.env_counter <= 0) {
+        if (s.attn < 15) {
+          s.attn = Math.min(15, s.attn + s.env_step);
+          dirty = true;
+        }
+        s.env_counter = s.env_spd;
+      } else {
+        s.env_counter--;
+      }
+    }
+    if (dirty && p) p.setAttn(3, s.attn);
+    s.timer--;
+    if (s.timer === 0 && p) { p.setAttn(3, 15); s.env_on = 0; }
+  }
+  function Sfx_Update() {
+    _sfxToneTick(0);
+    _sfxToneTick(1);
+    _sfxToneTick(2);
+    _sfxNoiseTick();
+    // compat mirror for any external caller reading sfxTimer[] directly
+    for (let ch = 0; ch < 3; ch++) sfxTimer[ch] = sfxTone[ch].timer;
+    sfxTimer[3] = sfxNoise.timer;
+  }
+  // Default `Sfx_Play(id)` dispatcher — audible fallback when the user's
+  // project does NOT define its own implementation (§5.2 AUDIO.md reference
+  // impl). Each id maps to a distinct arcade-style preset built from
+  // Sfx_PlayToneEx / Sfx_PlayNoiseEx (pitch sweep + attn envelope), so the
+  // dev hears a sound that at least suggests the event type (shoot / hit /
+  // explode / pickup / player-hit). A project that imports the real
+  // `PROJECT_SFX_*` tables + writes its own `Sfx_Play` will shadow this
+  // automatically (user-scope function wins over runtime-spread env).
+  //
+  // Preset cycle (id mod 6):
+  //   0 shoot      — high→low pitch sweep on ch0, short attn decay
+  //   1 hit        — white noise burst, fast attn decay
+  //   2 explode    — long white noise with slower envelope
+  //   3 pickup     — low→high up-sweep on ch1, medium decay (arcade "powerup")
+  //   4 player-hit — low ping-pong sweep on ch2, long duration
+  //   5 clear      — two-tone arpeggio (start ch0 now + ch1 3 frames later —
+  //                  frame 2 is the closest we get without a scheduler)
+  function Sfx_Play(id) {
+    const n = id & 0xFF;
+    hostLog(`[sfx] play id=${n}`);
+    const preset = n % 6;
+    switch (preset) {
+      case 0: // shoot — laser
+        Sfx_PlayToneEx(0, 140, 0, 18,
+                       600, 25, 1, 0, 1,   // sw_end=600, step 25 down, speed 1, no ping, on
+                       1, 1, 2);           // env on, +1 attn per 2 frames
+        break;
+      case 1: // hit
+        Sfx_PlayNoiseEx(0, 1, 4, 8,        // rate 0, white, attn 4, 8 frames
+                        0, 0,
+                        1, 2, 1);          // env on, +2 attn per frame
+        break;
+      case 2: // explode
+        Sfx_PlayNoiseEx(1, 1, 2, 28,       // rate 1, white, louder, longer
+                        0, 0,
+                        1, 1, 2);          // env on, slower decay
+        break;
+      case 3: // pickup / clear — up-sweep
+        Sfx_PlayToneEx(1, 400, 0, 16,
+                       180, -18, 1, 0, 1,  // sw_end=180, step -18 up, on
+                       1, 1, 3);
+        break;
+      case 4: // player-hit — low ping-pong
+        Sfx_PlayToneEx(2, 500, 3, 24,
+                       300, 15, 2, 1, 1,   // ping-pong on, slow
+                       1, 1, 4);
+        break;
+      case 5: // arpeggio open-note
+        Sfx_PlayToneEx(0, 291, 0, 10,      // ~E4
+                       218, -10, 1, 0, 1,  // up-sweep to ~A4
+                       1, 1, 3);
+        break;
+    }
+  }
   function Sfx_PlayPreset(_preset)     { hostLog('[sfx] preset'); }
   function Sfx_PlayPresetTable(_t, _c, id) { hostLog(`[sfx] preset table id=${id & 0xFF}`); }
+
+  // Short tone helper — flat pitch, no modulation.
   function Sfx_PlayToneCh(ch, div, attn, frames) {
-    hostLog(`[sfx] tone ch=${ch} div=${div} attn=${attn} frames=${frames}`);
+    if (ch < 0 || ch > 2) return;
+    const s = sfxTone[ch];
+    s.div = Math.max(1, Math.min(1023, div | 0));
+    s.attn = Math.max(0, Math.min(15, attn | 0));
+    s.timer = Math.max(0, frames | 0);
+    s.sw_on = 0; s.env_on = 0;
+    const p = psg();
+    if (p) { p.setTone(ch, s.div); p.setAttn(ch, s.attn); }
   }
-  function Sfx_PlayToneEx(ch, div, attn, frames /*, sw, env ... */) {
-    hostLog(`[sfx] tone-ex ch=${ch} div=${div} attn=${attn} frames=${frames}`);
+  // Extended tone — full template signature with pitch sweep + attn envelope.
+  // Stored in the channel state; `Sfx_Update()` (→ _sfxToneTick) applies the
+  // per-frame modulation. `sw_step` is signed: negative = down-sweep, positive
+  // = up-sweep. `sw_ping` makes the sweep ping-pong between base and end.
+  function Sfx_PlayToneEx(ch, div, attn, frames,
+                          sw_end, sw_step, sw_speed, sw_ping, sw_on,
+                          env_on, env_step, env_spd) {
+    if (ch < 0 || ch > 2) return;
+    const s = sfxTone[ch];
+    s.div = Math.max(1, Math.min(1023, div | 0));
+    s.attn = Math.max(0, Math.min(15, attn | 0));
+    s.timer = Math.max(0, frames | 0);
+    s.sw_base = s.div;
+    s.sw_end  = Math.max(1, Math.min(1023, sw_end | 0));
+    // Preserve the caller's sign on sw_step (s16). JS bitwise `| 0` keeps it.
+    s.sw_step = Math.abs((sw_step | 0));
+    s.sw_dir  = (sw_step | 0) < 0 ? -1 : +1;
+    s.sw_speed = Math.max(1, sw_speed | 0);
+    s.sw_counter = 0;
+    s.sw_on = sw_on ? 1 : 0;
+    s.sw_ping = sw_ping ? 1 : 0;
+    s.env_on = env_on ? 1 : 0;
+    s.env_step = Math.max(0, env_step | 0);
+    s.env_spd  = Math.max(1, env_spd  | 0);
+    s.env_counter = 0;
+    const p = psg();
+    if (p) { p.setTone(ch, s.div); p.setAttn(ch, s.attn); }
   }
+  // Noise (raw ctrl byte form). `val` follows the T6W28 register encoding:
+  // bits 1..0 = rate, bit 2 = type (0 periodic / 1 white).
   function Sfx_PlayNoise(val, attn, frames) {
-    hostLog(`[sfx] noise val=${val} attn=${attn} frames=${frames}`);
+    sfxNoise.attn = Math.max(0, Math.min(15, attn | 0));
+    sfxNoise.timer = Math.max(0, frames | 0);
+    sfxNoise.env_on = 0;
+    const p = psg();
+    if (p) { p.setNoise(val & 0xFF); p.setAttn(3, sfxNoise.attn); }
   }
-  function Sfx_PlayNoiseEx(rate, type, attn, frames /*…*/) {
-    hostLog(`[sfx] noise-ex rate=${rate} type=${type} attn=${attn} frames=${frames}`);
+  // Extended noise — rate + type + optional envelope.
+  function Sfx_PlayNoiseEx(rate, type, attn, frames,
+                           _burst, _burst_dur,
+                           env_on, env_step, env_spd) {
+    const ctrl = ((type & 1) << 2) | (rate & 3);
+    sfxNoise.attn = Math.max(0, Math.min(15, attn | 0));
+    sfxNoise.timer = Math.max(0, frames | 0);
+    sfxNoise.env_on = env_on ? 1 : 0;
+    sfxNoise.env_step = Math.max(0, env_step | 0);
+    sfxNoise.env_spd  = Math.max(1, env_spd  | 0);
+    sfxNoise.env_counter = 0;
+    const p = psg();
+    if (p) { p.setNoise(ctrl); p.setAttn(3, sfxNoise.attn); }
   }
   function Sfx_SendBytes(_b1, _b2, _b3) { /* no-op */ }
   function Sfx_BufferBegin()            { /* no-op */ }
   function Sfx_BufferPush(_b1, _b2, _b3){ /* no-op */ }
   function Sfx_BufferCommit()           { /* no-op */ }
-  function Sfx_Stop()                   { hostLog('[sfx] stop'); }
-  function Bgm_Start(_stream)           { hostLog('[bgm] start'); }
-  function Bgm_StartEx(_s, _loop)       { hostLog('[bgm] start-ex'); }
-  function Bgm_StartLoop(_s)            { hostLog('[bgm] start-loop'); }
-  function Bgm_StartLoop2(_a, _b)       { hostLog('[bgm] start-loop2'); }
-  function Bgm_StartLoop2Ex(_a, _la, _b, _lb) { hostLog('[bgm] start-loop2-ex'); }
-  function Bgm_StartLoop3(_a, _b, _c)   { hostLog('[bgm] start-loop3'); }
-  function Bgm_StartLoop3Ex()           { hostLog('[bgm] start-loop3-ex'); }
-  function Bgm_StartLoop4()             { hostLog('[bgm] start-loop4'); }
-  function Bgm_StartLoop4Ex()           { hostLog('[bgm] start-loop4-ex'); }
-  function Bgm_SetNoteTable(_t)         { /* no-op */ }
-  function Bgm_Stop()                   { hostLog('[bgm] stop'); }
-  function Bgm_FadeOut(speed)           { hostLog(`[bgm] fade-out speed=${speed}`); }
-  function Bgm_SetTempo(t)              { hostLog(`[bgm] tempo=${t}`); }
-  function Bgm_Update()                 { /* no-op */ }
-  function Bgm_SetSpeed(m)              { hostLog(`[bgm] speed=${m}`); }
-  function Bgm_SetGate(p)               { hostLog(`[bgm] gate=${p}%`); }
-  function Bgm_DebugReset()             { /* no-op */ }
-  function Bgm_DebugSnapshot(_out)      { /* no-op */ }
+  function Sfx_Stop() {
+    hostLog('[sfx] stop');
+    for (const s of sfxTone) { s.timer = 0; s.sw_on = 0; s.env_on = 0; }
+    sfxNoise.timer = 0; sfxNoise.env_on = 0;
+    const p = psg();
+    if (p) for (let ch = 0; ch < 4; ch++) p.setAttn(ch, 15);
+    for (let i = 0; i < 4; i++) sfxTimer[i] = 0;
+  }
+  // --- BGM stream interpreter ------------------------------------------
+  // Stream format (AUDIO.md §4): each of the 4 channels (CH0-CH2 = tones,
+  // CHN = noise) is a u8 array of note/opcode bytes.
+  //   1..51   = note index (looked up in NOTE_TABLE, divider for tone chans,
+  //             raw noise-ctrl byte 0..7 for the noise chan)
+  //   0xFF    = REST (silence this tick only)
+  //   0x00    = END of stream (or loop-back if a loop offset is set)
+  //   0xF0..9 = FX opcodes with fixed parameter counts
+  //
+  // `Bgm_Update()` advances each active channel by ONE tick per frame:
+  //   - opcodes consume their parameter bytes WITHOUT advancing a tick
+  //   - notes / REST / END consume exactly one tick
+  // Frame-lock is provided by the user's main loop calling `Sounds_Update()`
+  // (→ `Bgm_Update()`) once per `ngpc_vsync()`.
+  //
+  // Default note table covers A2 (110 Hz) to B6 (1975.5 Hz) in equal
+  // temperament — approximation of the driver's canonical NOTE_TABLE.
+  // `Bgm_SetNoteTable()` overrides with the project-exported table when
+  // the user wires it up (standard template pattern).
+  const BGM_DEFAULT_NOTE_TABLE = (() => {
+    const t = [];
+    // Notes 0..50 = indices 0..50 → 51 entries. A2 = 110 Hz at index 0.
+    for (let i = 0; i < 51; i++) {
+      const hz = 110 * Math.pow(2, i / 12);
+      t.push(Math.round(96000 / hz));
+    }
+    return t;
+  })();
+  // Opcode parameter counts — matches the template driver's sounds.h
+  // opcode table (SET_ATTN through SET_MACRO + EXT). v1 only reacts to
+  // SET_ATTN / HOST_CMD (fade); the rest are consumed to keep the stream
+  // pointer aligned without producing the effect.
+  const BGM_OPCODE_PARAMS = {
+    0xF0: 1, 0xF1: 2, 0xF2: 3, 0xF3: 4, 0xF4: 1,
+    0xF5: 0, 0xF6: 2, 0xF7: 1, 0xF8: 2, 0xF9: 4,
+    0xFA: 3, 0xFB: 1, 0xFC: 1, 0xFD: 1,
+    // 0xFE EXT: variable length (sub byte + per-sub payload). v1 drops
+    // the stream on EXT — see _bgmParamCount below.
+  };
+  const bgm = {
+    streams: [null, null, null, null],
+    offsets: [0, 0, 0, 0],
+    loops:   [0, 0, 0, 0],   // 0 = no loop, else byte offset to jump to on END
+    active:  false,
+    noteTable: null,
+    fadeStep: 0,             // frames remaining before next fade attn increment
+    fadeSpeed: 0,            // 0 = no fade
+    fadeAttn: 0,             // current fade-out attenuation offset (0..15)
+    baseAttn: [0, 0, 0, 0],  // per-channel SET_ATTN accumulator
+  };
+  function _bgmNotes() { return bgm.noteTable || BGM_DEFAULT_NOTE_TABLE; }
+  function _bgmApplyAttn(ch) {
+    const p = psg();
+    if (!p) return;
+    const eff = Math.min(15, bgm.baseAttn[ch] + bgm.fadeAttn);
+    p.setAttn(ch, eff);
+  }
+  function _bgmSilenceAll() {
+    const p = psg();
+    if (!p) return;
+    for (let i = 0; i < 4; i++) p.setAttn(i, 15);
+  }
+
+  function _isStream(x) {
+    return Array.isArray(x) || ArrayBuffer.isView(x);
+  }
+  function Bgm_Start(ch0, ch1, ch2, chn) {
+    // Some projects call `Bgm_Start(0)` or `Bgm_Start(track_id)` expecting a
+    // multi-song dispatcher. The template API requires 4 stream pointers —
+    // pass anything else through as a helpful log and no-op rather than
+    // silently swallowing it.
+    if (!_isStream(ch0) && ch1 === undefined && ch2 === undefined && chn === undefined) {
+      hostLog(`[bgm] Bgm_Start(${ch0}) — expected 4 channel streams, got a bare argument. ` +
+              `Use Bgm_StartLoop4Ex(CH0, L0, CH1, L1, CH2, L2, CHN, LN) with the exported streams.`);
+      return;
+    }
+    bgm.streams = [
+      _isStream(ch0) ? ch0 : null,
+      _isStream(ch1) ? ch1 : null,
+      _isStream(ch2) ? ch2 : null,
+      _isStream(chn) ? chn : null,
+    ];
+    bgm.offsets = [0, 0, 0, 0];
+    bgm.loops   = [0, 0, 0, 0];
+    bgm.baseAttn = [0, 0, 0, 0];
+    bgm.fadeStep = bgm.fadeSpeed = bgm.fadeAttn = 0;
+    bgm.active = bgm.streams.some(s => s && s.length);
+    _bgmSilenceAll();
+  }
+  function Bgm_StartEx(stream, loopOffset) {
+    Bgm_Start(stream, null, null, null);
+    bgm.loops[0] = loopOffset | 0;
+  }
+  function Bgm_StartLoop(stream)                    { Bgm_StartEx(stream, 0); }
+  function Bgm_StartLoop2(a, b)                     { Bgm_Start(a, b, null, null); }
+  function Bgm_StartLoop2Ex(a, la, b, lb)           { Bgm_Start(a, b, null, null); bgm.loops[0]=la|0; bgm.loops[1]=lb|0; }
+  function Bgm_StartLoop3(a, b, c)                  { Bgm_Start(a, b, c, null); }
+  function Bgm_StartLoop3Ex(a, la, b, lb, c, lc)    { Bgm_Start(a, b, c, null); bgm.loops[0]=la|0; bgm.loops[1]=lb|0; bgm.loops[2]=lc|0; }
+  function Bgm_StartLoop4(a, b, c, n)               { Bgm_Start(a, b, c, n); }
+  function Bgm_StartLoop4Ex(a, la, b, lb, c, lc, n, ln) {
+    Bgm_Start(a, b, c, n);
+    bgm.loops = [la|0, lb|0, lc|0, ln|0];
+  }
+  function Bgm_SetNoteTable(t) { bgm.noteTable = (t && t.length) ? t : null; }
+  function Bgm_Stop() {
+    bgm.active = false;
+    bgm.streams = [null, null, null, null];
+    _bgmSilenceAll();
+  }
+  function Bgm_FadeOut(speed) {
+    bgm.fadeSpeed = Math.max(0, speed | 0);
+    bgm.fadeStep = bgm.fadeSpeed;
+    if (bgm.fadeSpeed === 0) bgm.fadeAttn = 0;  // §3.7: speed 0 cancels fade
+  }
+  function Bgm_SetTempo(_t)  { /* v1: 1 tick/frame only */ }
+  function Bgm_SetSpeed(_m)  { /* v1: 1 tick/frame only */ }
+  function Bgm_SetGate(_p)   { /* v1: no gate modulation */ }
+  function Bgm_DebugReset()       { /* no-op */ }
+  function Bgm_DebugSnapshot(_o)  { /* no-op */ }
+
+  function Bgm_Update() {
+    if (!bgm.active) return;
+    // Fade-out: every `fadeSpeed` frames increment `fadeAttn` until 15.
+    if (bgm.fadeSpeed > 0) {
+      if (--bgm.fadeStep <= 0) {
+        bgm.fadeStep = bgm.fadeSpeed;
+        if (bgm.fadeAttn < 15) bgm.fadeAttn++;
+        for (let ch = 0; ch < 4; ch++) _bgmApplyAttn(ch);
+        if (bgm.fadeAttn >= 15) { Bgm_Stop(); return; }
+      }
+    }
+    const notes = _bgmNotes();
+    const p = psg();
+    let anyActive = false;
+    for (let ch = 0; ch < 4; ch++) {
+      const stream = bgm.streams[ch];
+      if (!stream) continue;
+      anyActive = true;
+      // Consume opcodes + exactly one tick-consuming byte (note / REST / END).
+      let guard = 32;
+      while (guard-- > 0) {
+        const idx = bgm.offsets[ch];
+        if (idx >= stream.length) {
+          bgm.streams[ch] = null;
+          if (p) p.setAttn(ch, 15);
+          break;
+        }
+        const b = stream[idx] & 0xFF;
+        if (b === 0x00) {
+          // END — loop back if configured, else drop channel.
+          if (bgm.loops[ch] > 0) { bgm.offsets[ch] = bgm.loops[ch]; continue; }
+          bgm.streams[ch] = null;
+          if (p) p.setAttn(ch, 15);
+          break;
+        }
+        if (b === 0xFF) {
+          // REST — silence this tick, advance.
+          if (p) p.setAttn(ch, 15);
+          bgm.offsets[ch]++;
+          break;
+        }
+        if (b >= 1 && b <= 51) {
+          // Note — tone channels look up NOTE_TABLE; noise channel treats
+          // byte 1..8 as noise control register (0..7 per §4.3).
+          if (ch < 3) {
+            const noteIdx = b - 1;
+            const div = notes[noteIdx] || 1023;
+            if (p) p.setTone(ch, div);
+          } else {
+            if (p) p.setNoise((b - 1) & 0xFF);
+          }
+          _bgmApplyAttn(ch);
+          bgm.offsets[ch]++;
+          break;
+        }
+        // FX opcode: consume parameters without advancing tick.
+        // 0xFE EXT has variable-length payload — v1 drops the stream
+        // instead of risking misalignment.
+        if (b === 0xFE) {
+          bgm.streams[ch] = null;
+          if (p) p.setAttn(ch, 15);
+          break;
+        }
+        const params = BGM_OPCODE_PARAMS[b];
+        if (params === undefined) { bgm.offsets[ch]++; break; }
+        if (b === 0xF0) {
+          // SET_ATTN — base attenuation for this channel.
+          bgm.baseAttn[ch] = stream[idx + 1] & 0x0F;
+          _bgmApplyAttn(ch);
+        } else if (b === 0xF6) {
+          // HOST_CMD — type byte, data byte. Only handle fade-out in v1.
+          const type = stream[idx + 1] & 0xFF;
+          const data = stream[idx + 2] & 0xFF;
+          if (type === 0) Bgm_FadeOut(data);
+        }
+        // F1 env / F2 vib / F3 sweep / F4 inst / F5 pan / F7 expr / F8
+        // pitch-bend / F9 adsr: skip parameters in v1 (see roadmap 0bis-6).
+        bgm.offsets[ch] += 1 + params;
+      }
+    }
+    if (!anyActive) bgm.active = false;
+  }
 
   // ---- Palette FX (ngpc_palfx.h) ---------------------------------------
   //
