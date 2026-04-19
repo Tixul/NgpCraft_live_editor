@@ -899,15 +899,16 @@ main {
     display: flex;
     align-items: center;
     justify-content: center;
-    min-height: 200px;
+    height: 55vh;
+    min-height: 240px;
     flex-shrink: 0;
-    padding: 8px 0;
+    padding: 4px;
   }
   body[data-mobile-tab="screen"] #screen {
     width: auto !important;
     height: auto !important;
     max-width: 100%;
-    max-height: 50vh;
+    max-height: 100%;
     aspect-ratio: 160 / 152;
     image-rendering: pixelated;
   }
@@ -1059,9 +1060,8 @@ main {
   .joypad-overlay { bottom: 0; left: 56px; }
 
   /* Canvas uses most of the height, aspect-locked */
-  body[data-mobile-tab="screen"] #screen {
-    max-height: 70vh;
-    max-width: 70vw;
+  body[data-mobile-tab="screen"] .screen-wrap {
+    height: 85vh;
   }
 
   /* Leave room for the joypad at the bottom */
