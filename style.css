@@ -904,15 +904,27 @@ main {
     padding: 8px 0;
   }
   body[data-mobile-tab="screen"] #screen {
+    width: auto !important;
+    height: auto !important;
     max-width: 100%;
     max-height: 50vh;
+    aspect-ratio: 160 / 152;
     image-rendering: pixelated;
   }
   /* Log and debug panels compact below canvas */
   body[data-mobile-tab="screen"] #log { max-height: 80px; }
   body[data-mobile-tab="screen"] .debug-panel,
-  body[data-mobile-tab="screen"] .palette-panel,
-  body[data-mobile-tab="screen"] .keymap-panel { flex-shrink: 0; }
+  body[data-mobile-tab="screen"] .palette-panel { flex-shrink: 0; }
+  /* Keyboard-to-pad rebinding panel is useless on mobile (touch joypad) */
+  body[data-mobile-tab="screen"] .keymap-panel { display: none; }
+  /* Leave room below scrollable content so the joypad overlay doesn't cover
+     the bottom of the debug/palette panels when scrolled to the end. */
+  body[data-mobile-tab="screen"] .screen-pane::after {
+    content: '';
+    display: block;
+    height: 220px;
+    flex-shrink: 0;
+  }
 
   /* Autocomplete popup: avoid going off-screen */
   .autocomplete-popup { max-width: calc(100vw - 1rem); }
@@ -1015,4 +1027,43 @@ main {
     letter-spacing: 0.05em;
     text-transform: uppercase;
   }
+}
+
+/* ---- Landscape mobile: tab bar on the left, canvas fills height ---- */
+@media (max-width: 1023px) and (orientation: landscape) {
+  /* Tab bar vertical, left side */
+  .mobile-tabbar {
+    flex-direction: column;
+    top: 0; left: 0; right: auto; bottom: 0;
+    width: 56px;
+    height: 100%;
+    border-top: none;
+    border-right: 2px solid #333;
+  }
+  .mobile-tab-btn {
+    border-top: none;
+    border-left: 3px solid transparent;
+  }
+  .mobile-tab-btn.active {
+    border-top-color: transparent;
+    border-left-color: #9cdcfe;
+  }
+
+  /* Main content shifts right of the tab bar */
+  main {
+    padding-bottom: 0;
+    padding-left: 56px;
+  }
+
+  /* Joypad overlay uses full viewport bottom (no horizontal tab bar) */
+  .joypad-overlay { bottom: 0; left: 56px; }
+
+  /* Canvas uses most of the height, aspect-locked */
+  body[data-mobile-tab="screen"] #screen {
+    max-height: 70vh;
+    max-width: 70vw;
+  }
+
+  /* Leave room for the joypad at the bottom */
+  body[data-mobile-tab="screen"] .screen-pane::after { height: 140px; }
 }
