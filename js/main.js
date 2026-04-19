@@ -22,6 +22,7 @@
   const logFilterErr   = document.getElementById('log-filter-err');
   const logFilterAudio = document.getElementById('log-filter-audio');
   const logClearBtn    = document.getElementById('log-clear-btn');
+  const logCopyBtn     = document.getElementById('log-copy-btn');
   const treeEl     = document.getElementById('tree');
   const tabsListEl = document.getElementById('tabs-list');
 
@@ -336,6 +337,50 @@
   [logFilterInfo, logFilterErr, logFilterAudio].forEach(el =>
     el.addEventListener('change', syncLogFilters));
   logClearBtn.addEventListener('click', clearLog);
+
+  /* Copy log contents. Uses the async Clipboard API with a small visual
+   * feedback ("Copied" for 1s); falls back to the legacy selection +
+   * document.execCommand('copy') path on older WebViews where the async
+   * API isn't available. */
+  function copyLogToClipboard() {
+    const text = logEl.innerText;
+    const flash = (msg) => {
+      const prev = logCopyBtn.textContent;
+      logCopyBtn.textContent = msg;
+      setTimeout(() => { logCopyBtn.textContent = prev; }, 1000);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(
+        () => flash('Copied'),
+        () => flash('Copy failed')
+      );
+      return;
+    }
+    const range = document.createRange();
+    range.selectNodeContents(logEl);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    try { flash(document.execCommand('copy') ? 'Copied' : 'Copy failed'); }
+    catch (_e) { flash('Copy failed'); }
+    sel.removeAllRanges();
+  }
+  logCopyBtn.addEventListener('click', copyLogToClipboard);
+
+  /* Ctrl+A / Cmd+A inside the log selects only the log text (not the whole
+   * page). Requires #log to have tabindex="0" so clicking it gives it focus;
+   * otherwise the browser's default Ctrl+A covers the whole document. */
+  logEl.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A')) {
+      e.preventDefault();
+      const range = document.createRange();
+      range.selectNodeContents(logEl);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+  });
+
   syncLogFilters();
 
   /* Gutter line numbers. Builds a "1\n2\n…\nN" string, widens the gutter if

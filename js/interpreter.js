@@ -177,7 +177,16 @@ const NGPC_Interp = (() => {
         const m = joined.match(/^[ \t]*#define\s+(\w+)(\([^)]*\))?\s*(.*)$/);
         if (m) {
           const [, name, paramsRaw, body] = m;
-          if (paramsRaw !== undefined) {
+          // Reserved qualifier names. The NGPC template headers contain
+          // `#ifndef NGP_FAR / #define NGP_FAR / #endif` to keep user code
+          // portable when no qualifier is needed. If we let that macro into
+          // the expansion table, every `NGP_FAR` in the source gets stripped
+          // BEFORE the HW-1 lint runs, making every ROM pointer look near
+          // and defeating the whole check. We leave the tokens alone here;
+          // `stripCC900Qualifiers` removes them at the end of `compile()`.
+          if (name === 'NGP_FAR' || name === 'NGP_NEAR') {
+            // fall through to blank-line replacement only
+          } else if (paramsRaw !== undefined) {
             const params = paramsRaw.slice(1, -1).split(',')
               .map(p => p.trim()).filter(Boolean);
             macros.push({ name, params, body: body.trim(), fn: true });
@@ -192,44 +201,116 @@ const NGPC_Interp = (() => {
     // accidentally matches inside it (word-boundary check already prevents this
     // but explicit ordering is safer).
     macros.sort((a, b) => b.name.length - a.name.length);
-    for (const macro of macros) {
-      if (macro.fn) {
-        // Function-like: match `NAME(args)` with balanced-paren arg list.
-        const re = new RegExp(`\\b${macro.name}\\s*\\(([^()]*(?:\\([^()]*\\)[^()]*)*)\\)`, 'g');
-        src = src.replace(re, (_m, argsStr) => {
-          // Split args on top-level commas.
-          const args = [];
-          let depth = 0, buf = '';
-          for (const ch of argsStr) {
-            if (ch === '(') depth++;
-            else if (ch === ')') depth--;
-            if (ch === ',' && depth === 0) { args.push(buf.trim()); buf = ''; }
-            else buf += ch;
-          }
-          if (buf.trim() || args.length > 0) args.push(buf.trim());
-          let body = macro.body;
-          // Substitute each parameter name with the corresponding argument.
-          for (let i = 0; i < macro.params.length; i++) {
-            body = body.replace(new RegExp(`\\b${macro.params[i]}\\b`, 'g'),
-                                args[i] || '');
-          }
-          // Token pasting (C99 §6.10.3.3): `A ## B` joins the surrounding
-          // tokens into one. Real preprocessors paste post-substitution,
-          // which is what we do here (parameter subst already ran). Used by
-          // NGP_TILEMAP_BLIT_SCR1(sym, base) → sym##_tiles / sym##_map etc.
-          body = body.replace(/\s*##\s*/g, '');
-          return body;
-        });
-      } else {
-        // Object-like: bareword replacement, still honour ## in the body.
-        let body = macro.body.replace(/\s*##\s*/g, '');
-        src = src.replace(new RegExp(`\\b${macro.name}\\b`, 'g'), body);
+
+    // Iterate to a fixed point (max 8 passes) so macro-calling-macro works.
+    // Target: the `NGP_TILEMAP_BLIT_SCR1` family from the template's
+    // `ngpc_tilemap_blit.h` — the outer macro expands to three inner macros
+    // (`LOAD_TILES_VRAM`, `LOAD_PALETTES_*`, `PUT_MAP_*`), each of which uses
+    // `prefix##_tiles` / `prefix##_map_pals` etc. Single-pass expansion
+    // leaves the inner macros literal, so the JS interpreter throws "X is
+    // not a function" at runtime — and this is the safe alternative path
+    // recommended when NGP_FAR helpers produce corrupted output.
+    //
+    // Cap at 8 iterations to contain pathological `#define X X+1`-style
+    // self-reference. 8 is well above observed nesting depth (2–3).
+    const MAX_ITERS = 8;
+    for (let iter = 0; iter < MAX_ITERS; iter++) {
+      const before = src;
+      for (const macro of macros) {
+        if (macro.fn) {
+          // Function-like: match `NAME(args)` with balanced-paren arg list.
+          const re = new RegExp(`\\b${macro.name}\\s*\\(([^()]*(?:\\([^()]*\\)[^()]*)*)\\)`, 'g');
+          src = src.replace(re, (_m, argsStr) => {
+            // Split args on top-level commas.
+            const args = [];
+            let depth = 0, buf = '';
+            for (const ch of argsStr) {
+              if (ch === '(') depth++;
+              else if (ch === ')') depth--;
+              if (ch === ',' && depth === 0) { args.push(buf.trim()); buf = ''; }
+              else buf += ch;
+            }
+            if (buf.trim() || args.length > 0) args.push(buf.trim());
+            let body = macro.body;
+            // Substitute each parameter name with the corresponding argument.
+            for (let i = 0; i < macro.params.length; i++) {
+              body = body.replace(new RegExp(`\\b${macro.params[i]}\\b`, 'g'),
+                                  args[i] || '');
+            }
+            // Token pasting (C99 §6.10.3.3): `A ## B` joins the surrounding
+            // tokens into one. Real preprocessors paste post-substitution,
+            // which is what we do here (parameter subst already ran). Used
+            // by e.g. `NGP_TILEMAP_BLIT_SCR1(sym, base)` → `sym##_tiles`.
+            body = body.replace(/\s*##\s*/g, '');
+            return body;
+          });
+        } else {
+          // Object-like: bareword replacement, still honour ## in the body.
+          let body = macro.body.replace(/\s*##\s*/g, '');
+          src = src.replace(new RegExp(`\\b${macro.name}\\b`, 'g'), body);
+        }
       }
+      if (src === before) break;  // fixed point reached
     }
     return src;
   }
 
   function stripPreprocessor(src) { return src.replace(/^[ \t]*#.*$/gm, ''); }
+
+  // Fast path for large numeric asset arrays.
+  //
+  // Problem: generated asset files (from the NGPC asset pipeline) emit
+  // declarations like
+  //   `const u16 NGP_FAR bg_map_tiles[1024] = { 0x0100, 0x0101, …, 0x010F };`
+  // with 500–8000 numeric literals. Every downstream rewrite pass then walks
+  // the entire source; passes that iterate character-by-character
+  // (rewriteInitializers, the deref marker, etc.) are O(N) on that bulk for
+  // no useful work — the body is pure data with nothing to transform.
+  //
+  // Fix: detect such declarations before the main pipeline, replace the
+  // `{literal, literal, …}` body with a short opaque placeholder token. The
+  // skeleton `const TYPE name[N] = {__ARR_BODY_K__};` remains in place so
+  // the HW-1 lint still sees the decl. At the end of `compile()`, swap the
+  // placeholder back to the real comma-separated list — downstream has
+  // already turned `{…}` into `[…]` (rewriteInitializers), so the result is
+  // a clean JS array literal.
+  //
+  // Safety: only extract if the body is purely numeric (hex / decimal,
+  // optional leading `-`, `u`/`U`/`l`/`L` integer suffixes, commas,
+  // whitespace). Anything else — macro ref, identifier, arithmetic — keeps
+  // the original path.
+  const ARR_FAST_MIN_ELEMENTS = 256;
+  function extractLargeArrays(src) {
+    const extracted = [];
+    // Capture declarations of the shape `...const TYPE [NGP_FAR] name[...]
+    // [NGP_FAR] = { BODY };`. BODY is `[^{}]*` to exclude nested braces
+    // (which indicate a non-flat initializer we shouldn't touch).
+    const RE = /(const\s+(?:(?:extern|static)\s+)?(?:NGP_FAR\s+)?\w+(?:\s+NGP_FAR)?\s+(?:NGP_FAR\s+)?(\w+)\s*\[[^\]]*\]\s*(?:NGP_FAR\s*)?=\s*)\{([^{}]*)\}(\s*;)/g;
+    const PURE_NUMERIC = /^(?:\s|,|-|0x[0-9a-fA-F]+|\d+|[uUlL])*$/;
+    return {
+      src: src.replace(RE, (match, head, _name, body, tail) => {
+        if (!PURE_NUMERIC.test(body)) return match;
+        // Count elements (tokens that look like numbers) cheaply.
+        const elementMatches = body.match(/0x[0-9a-fA-F]+|-?\d+/g);
+        if (!elementMatches || elementMatches.length < ARR_FAST_MIN_ELEMENTS) return match;
+        // Normalise: drop u/U/l/L suffixes (JS doesn't accept them).
+        const elements = elementMatches.join(',');
+        const idx = extracted.length;
+        extracted.push(elements);
+        return `${head}{__ARR_BODY_${idx}__}${tail}`;
+      }),
+      extracted,
+    };
+  }
+
+  function reinjectArrays(src, extracted) {
+    if (!extracted || extracted.length === 0) return src;
+    // rewriteInitializers has converted `{__ARR_BODY_K__}` into
+    // `[__ARR_BODY_K__]` for array-shaped inits. Swap the placeholder token
+    // for the real list — surrounding `[` / `]` stay put.
+    return src.replace(/__ARR_BODY_(\d+)__/g,
+      (_m, k) => extracted[Number(k)] || '');
+  }
 
   // Strip inline TLCS-900/H assembly. Real projects (e.g. fast RAM copies
   // in sound drivers) use `__asm__("…")`, `asm("…")`, or the cc900
@@ -428,6 +509,303 @@ const NGPC_Interp = (() => {
       .replace(/\/\*[\s\S]*?\*\//g, (m) => blankLines(countLines(m)))
       .replace(/\/\/[^\n]*/g, '');
   }
+
+  // Hardware-fidelity error system.
+  //
+  // The live editor runs a JS-based interpreter that is far more permissive
+  // than cc900 + real NGPC silicon. Classes of bugs that would silently
+  // corrupt display, hang the CPU, or fail to compile on the target
+  // toolchain can execute cleanly here. That defeats the debug-value of the
+  // editor.
+  //
+  // Each rule (see HW-x below) pushes an `HwError` to a shared accumulator
+  // threaded through `compile()`. A single `HwFidelityError` carrying all
+  // collected errors is thrown at the end, so the user gets every violation
+  // in one pass instead of fix-one-rerun-repeat.
+  //
+  // Design rules:
+  //  - No escape hatch: if the code breaks on silicon, it breaks in-editor.
+  //  - Each error carries: rule ID, title, location, why (hardware symptom),
+  //    fix (concrete code change).
+  //  - Messages are actionable — a dev reading one knows exactly what to edit.
+  class HwFidelityError extends Error {
+    constructor(errors) {
+      const header = errors.length === 1
+        ? 'Hardware-fidelity error — code would break on real hardware:'
+        : `Hardware-fidelity — ${errors.length} error(s) would break on real hardware:`;
+      const body = errors.map(formatHwError).join('\n\n');
+      super(header + '\n\n' + body);
+      this.hwErrors = errors;
+      this.name = 'HwFidelityError';
+    }
+  }
+  function formatHwError(e) {
+    const out = [`[${e.rule}] ${e.title}`];
+    if (e.lines) e.lines.forEach(l => out.push('  ' + l));
+    if (e.extra) e.extra.forEach(l => out.push('  ' + l));
+    if (e.why)   out.push('', '  On hardware: ' + e.why);
+    if (e.fix)   out.push('  Fix: ' + e.fix);
+    return out.join('\n');
+  }
+
+  // HW-3b — loop variable declared inside `for (…)`.
+  //
+  // Hardware context: the `for (TYPE name = …; …; …)` init-declaration form
+  // is a C99 extension. cc900 is C89 strict and rejects it with a syntax
+  // error at compile time. The JS interpreter accepts it without warning,
+  // so the bug only surfaces when the user moves the code to a real build.
+  //
+  // Detection: regex on `for (` followed by any recognised type keyword
+  // (primitive or storage-class-qualified) followed by a name and `=`.
+  function lintForDecl(src, errors) {
+    const PRIM = '(?:u8|u16|u32|s8|s16|s32|u_char|u_short|u_long|char|short|int|long|bool)';
+    const STORAGE = '(?:const|static|register|volatile|unsigned|signed)';
+    const RE = new RegExp(
+      '\\bfor\\s*\\(\\s*(?:' + STORAGE + '\\s+)*' + PRIM + '\\s+(\\w+)\\s*=',
+      'g'
+    );
+    let m;
+    while ((m = RE.exec(src)) !== null) {
+      const line = src.slice(0, m.index).split('\n').length;
+      errors.push({
+        rule: 'HW-3b',
+        title: `loop variable declared inside for() — "${m[1]}"`,
+        lines: [`Line ${line}: ${m[0]} …`],
+        why: 'cc900 rejects declarations in the for-init clause (C99 extension). ' +
+             'All locals must be declared at the top of the enclosing block.',
+        fix: `Declare \`${m[1]}\` at the start of the block, then use \`for (${m[1]} = 0; …)\`.`,
+      });
+    }
+  }
+
+  // HW-2 — `volatile` missing on ISR-shared variable.
+  //
+  // Hardware context: cc900 will cache a file-scope global in a CPU register
+  // inside a non-ISR loop and never re-read memory. If an `__interrupt`
+  // function writes the memory location, the main-loop register stays stale
+  // → `while (!g_flag) { }` becomes an infinite wait on real silicon. The
+  // `volatile` qualifier forces every access through memory.
+  //
+  // Detection shape: find every `__interrupt` function body, collect the
+  // bareword scalar lvalues it writes (assignment / ++ / -- / compound ops),
+  // cross-reference with file-scope scalar globals. Any global that is
+  // written by an ISR and declared without `volatile` is an HW-2 error.
+  //
+  // Scope v1 (precision > recall): scalar globals only. Arrays, struct
+  // fields, and pointer-dereference writes (`p->x`, `a.b`, `arr[i]`) are
+  // ignored — their coherence needs more analysis than a regex pass gives.
+  function lintIsrVolatile(src, errors) {
+    const PRIM = '(?:u8|u16|u32|s8|s16|s32|u_char|u_short|u_long|char|short|int|long|bool)';
+
+    // --- Pass 1: gather file-scope scalar globals.
+    // Match `[storage]* [volatile] [const] TYPE name [= …];` anchored to the
+    // start of a line. We skip array-shaped (`name[…]`) and pointer-shaped
+    // (`*name`) decls so the detector stays false-positive-free.
+    const globals = new Map();  // name → { line, hasVolatile }
+    const GLOBAL_RE = new RegExp(
+      '(?:^|\\n)[ \\t]*' +
+      '((?:(?:extern|static|register)\\s+)*)' +
+      '(volatile\\s+)?' +
+      '(?:const\\s+)?' +
+      PRIM + '\\s+' +
+      '(\\w+)\\s*' +
+      '(?:=[^;]*)?;',
+      'g'
+    );
+    let gm;
+    while ((gm = GLOBAL_RE.exec(src)) !== null) {
+      const name = gm[3];
+      const hasVolatile = !!gm[2];
+      const line = src.slice(0, gm.index).split('\n').length;
+      if (!globals.has(name)) globals.set(name, { line, hasVolatile });
+    }
+    if (globals.size === 0) return;
+
+    // --- Pass 2: find every `__interrupt` function and its body range.
+    // Supports both orderings: `void __interrupt name(…)` and
+    // `__interrupt void name(…)`. The `(?:\s+\w+)*` consumes return-type /
+    // qualifier words between `__interrupt` and the function name; the
+    // trailing `\s+(\w+)\s*\(` pins the capture to the identifier directly
+    // before the argument list.
+    const ISR_RE = /\b__interrupt\b(?:\s+\w+)*\s+(\w+)\s*\([^()]*\)\s*\{/g;
+    let im;
+    while ((im = ISR_RE.exec(src)) !== null) {
+      const isrName = im[1];
+      // Brace-match to find the closing `}`. ISR bodies tend to be short;
+      // a naive counter is fine.
+      let depth = 1;
+      let k = ISR_RE.lastIndex;
+      while (k < src.length && depth > 0) {
+        const ch = src[k];
+        if (ch === '{') depth++;
+        else if (ch === '}') depth--;
+        k++;
+      }
+      const body = src.slice(ISR_RE.lastIndex, k - 1);
+
+      // --- Pass 3: find bareword scalar lvalues written in the body.
+      // Matches `name = …` (but not `==`), `name++`, `name--`, `name +=`,
+      // `name -=`, etc. Qualified writes like `p->x =`, `a.b =`, `arr[i] =`
+      // are ignored — v1 targets scalar globals only.
+      const writes = new Set();
+      const LVAL_RE = /(?<![.\]\w>])\b(\w+)\s*(?:=(?!=)|\+\+|--|\+=|-=|\*=|\/=|%=|&=|\|=|\^=|<<=|>>=)/g;
+      let lm;
+      while ((lm = LVAL_RE.exec(body)) !== null) {
+        writes.add(lm[1]);
+      }
+
+      // --- Pass 4: cross-reference.
+      for (const name of writes) {
+        const g = globals.get(name);
+        if (!g || g.hasVolatile) continue;
+        // Dedupe: same (name, isr) only reported once per compile.
+        const key = `HW-2|${name}|${isrName}`;
+        if (errors.some(e => e._key === key)) continue;
+        errors.push({
+          _key: key,
+          rule: 'HW-2',
+          title: `volatile missing on ISR-shared variable "${name}"`,
+          lines: [`Declared line ${g.line} without volatile`],
+          extra: [`Written by __interrupt function "${isrName}"`],
+          why: 'cc900 caches the variable in a CPU register inside non-ISR code. ' +
+               "The ISR's write to memory never reaches the register → stale reads " +
+               'and infinite wait loops like `while (!flag) {}` on real hardware.',
+          fix: `volatile <type> ${name};`,
+        });
+      }
+    }
+  }
+
+  // HW-1 — NGP_FAR mismatch.
+  //
+  // Hardware context: cc900 uses 16-bit (near) pointers by default. Main RAM
+  // sits at 0x004000–0x005FFF (near-reachable); cartridge ROM starts at
+  // 0x200000, completely out of near range. `const` file-scope data lives in
+  // ROM. Passing a near pointer to a parameter declared `NGP_FAR *` makes
+  // cc900 zero-extend 16→24 bits: fine for RAM (0x004000 → 0x004000), broken
+  // for ROM (near only encodes low 16 bits, so the pointer resolves to
+  // 0x00xxxx instead of 0x20xxxx) → reads wrong memory → corrupted image.
+  //
+  // Detection shape: if a call site passes a `const`-without-NGP_FAR
+  // identifier to a parameter declared `NGP_FAR *`, that's a silent hw bug.
+  // The JS interpreter strips NGP_FAR and treats all pointers as JS numbers,
+  // so this bug class is INVISIBLE in-editor until a ROM is flashed.
+  //
+  // Scope (precision > recall): we only flag the unambiguous case. `const`
+  // declarations at file scope with no NGP_FAR (either position) passed to a
+  // NGP_FAR pointer parameter. Non-const arguments (RAM → zero-extend OK)
+  // and declarations that already carry NGP_FAR are skipped.
+  function lintNgpFar(src, errors) {
+    const PRIM = '(?:u8|u16|u32|s8|s16|s32|u_char|u_short|u_long|char|short|int|long)';
+
+    // --- Pass 1: collect function prototypes / definitions with NGP_FAR params.
+    // Shape: `TYPE name(PARAMS) ;|{`. We require `NGP_FAR` + `*` inside PARAMS
+    // so the prototype table stays tight (calls without NGP_FAR in the
+    // signature are never in the map, making call-site scanning cheap).
+    const farParams = new Map();  // fnName → Set<paramIndex>
+    const PROTO_RE = /(\w+)\s*\(([^()]*)\)\s*[;{]/g;
+    const CTL_KW = /^(?:if|while|for|switch|return|sizeof|do|else)$/;
+    let pm;
+    while ((pm = PROTO_RE.exec(src)) !== null) {
+      const fnName = pm[1];
+      if (CTL_KW.test(fnName)) continue;
+      const paramStr = pm[2];
+      if (!/\bNGP_FAR\b/.test(paramStr)) continue;
+      const params = paramStr.split(',');
+      const farSet = farParams.get(fnName) || new Set();
+      for (let i = 0; i < params.length; i++) {
+        // A NGP_FAR pointer parameter needs both the qualifier and a `*`.
+        if (/\bNGP_FAR\b[^,]*\*/.test(params[i])) farSet.add(i);
+      }
+      if (farSet.size > 0) farParams.set(fnName, farSet);
+    }
+    if (farParams.size === 0) return;
+
+    // --- Pass 2: collect `const` declarations, classify as with/without NGP_FAR.
+    // We match file-scope const arrays / structs (no `*` between type and
+    // name → excludes `const TYPE *name` which is a pointer in RAM, not the
+    // data). Two qualifier positions accepted:
+    //   (a) pre-name  : `const u16 NGP_FAR name[N] = {...}`
+    //   (b) post-name : `const u16 name[N] NGP_FAR = {...}`
+    // cc900 accepts both — the qualifier annotates the storage, not the name.
+    const romNoFar = new Map();   // name → line number of first decl without NGP_FAR
+    const romWithFar = new Set(); // names declared WITH NGP_FAR somewhere
+    const lines = src.split('\n');
+    const DECL_RE = new RegExp(
+      '(?:^|[;{}\\s])' +                     // boundary
+      '(?:(?:extern|static)\\s+)*' +         // optional storage class
+      'const\\s+(?:' + PRIM + '|\\w+)\\s+' + // const TYPE (primitive or user type)
+      '(NGP_FAR\\s+)?' +                     // (1) optional pre-name NGP_FAR
+      '(\\w+)\\s*' +                         // (2) name
+      '(\\[[^\\]]*\\])?' +                   // (3) optional [N]
+      '([^=;]*)' +                           // (4) tail up to = or ;
+      '(?:=|;)'
+    );
+    for (let li = 0; li < lines.length; li++) {
+      const m = DECL_RE.exec(lines[li]);
+      if (!m) continue;
+      const preFar = !!m[1];
+      const name = m[2];
+      const tail = m[4] || '';
+      const postFar = /\bNGP_FAR\b/.test(tail);
+      const hasFar = preFar || postFar;
+      // Skip if the matched "name" is itself a type keyword — the outer
+      // `const TYPE name` regex can misfire on lines like `const u16 name`
+      // when `name` happens to be another type keyword.
+      if (new RegExp('^' + PRIM + '$').test(name)) continue;
+      if (hasFar) romWithFar.add(name);
+      else if (!romNoFar.has(name)) romNoFar.set(name, li + 1);
+    }
+    if (romNoFar.size === 0) return;
+
+    // --- Pass 3: scan call sites, cross-reference against both tables.
+    const CALL_RE = /(\w+)\s*\(([^()]*)\)/g;
+    const seen = new Set();  // dedupe (sym, fn, argIdx) per compile
+    for (let li = 0; li < lines.length; li++) {
+      const line = lines[li];
+      let cm;
+      CALL_RE.lastIndex = 0;
+      while ((cm = CALL_RE.exec(line)) !== null) {
+        const fnName = cm[1];
+        const farSet = farParams.get(fnName);
+        if (!farSet) continue;
+        // Skip if this occurrence is a prototype / definition, not a call.
+        // Prototypes contain NGP_FAR inside the parens; calls don't.
+        if (/\bNGP_FAR\b/.test(cm[2])) continue;
+        const args = cm[2].split(',').map(a => a.trim());
+        for (const idx of farSet) {
+          const arg = args[idx];
+          if (!arg) continue;
+          // Lead identifier: strip leading `&` / `*` / whitespace, take first word.
+          const lead = /^[&*]?\s*([A-Za-z_]\w*)/.exec(arg);
+          if (!lead) continue;
+          const sym = lead[1];
+          if (romWithFar.has(sym)) continue;
+          if (!romNoFar.has(sym)) continue;
+          // Skip if arg is an array-subscript expression that doesn't take
+          // the address (e.g. `tiles[i]` passes a u16 value, type error
+          // the user will hit separately). Keep `&tiles[i]`.
+          if (/\[/.test(arg) && !/^&/.test(arg)) continue;
+          const key = `${sym}|${fnName}|${idx}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const declLi = romNoFar.get(sym);
+          errors.push({
+            rule: 'HW-1',
+            title: `NGP_FAR missing on ROM data "${sym}"`,
+            lines: [`Declared line ${declLi} without NGP_FAR`],
+            extra: [`Passed to ${fnName}() as argument #${idx + 1} at line ${li + 1}`],
+            why: 'cc900 emits a 16-bit near pointer here. When zero-extended to 24 bits ' +
+                 'it resolves to 0x00xxxx instead of 0x20xxxx in cartridge ROM — the live ' +
+                 'editor strips the qualifier so execution looks fine, but on real hardware ' +
+                 'the image will be corrupted.',
+            fix: `const TYPE NGP_FAR ${sym}[...]`,
+          });
+        }
+      }
+    }
+  }
+
   // Strip cc900-specific qualifier keywords so the remaining passes don't
   // have to know about them. All are compile-time hints that don't affect
   // runtime semantics in a JS-transpiled emulator:
@@ -1414,6 +1792,11 @@ const NGPC_Interp = (() => {
     // ngpc_sleep internally calls vsync, so a main() that uses sleep is
     // also frame-driven — expand both the same way.
     let out = src;
+    // Hardware-fidelity lints accumulate here. `compile()` throws a single
+    // HwFidelityError carrying every collected error at the end, so the user
+    // sees all violations in one shot instead of fix-one-rerun-repeat. No
+    // rule is active yet — see 0-4 / 0-6 / 0-7 for the first populating calls.
+    const hwErrors = [];
     out = stripComments(out);
     // Preprocessor stages that depend on multi-file input: resolve #include
     // against the caller-provided resolver, then evaluate #if/#ifdef branches
@@ -1427,6 +1810,9 @@ const NGPC_Interp = (() => {
       out = stripComments(out);
     }
     out = evalConditionals(out);
+    // HW-3b: `for (TYPE name = 0; …)` is C99. Runs on post-preproc source so
+    // disabled #if branches don't trigger false positives.
+    lintForDecl(out, hwErrors);
     const hasVsync = /\bngpc_vsync\b/.test(out) || /\bngpc_sleep\s*\(/.test(out);
     const userTypes = new Set([...TEMPLATE_TYPES, ...extractUserTypes(out)]);
     out = hoistFunctionStatics(out, userTypes);
@@ -1434,6 +1820,23 @@ const NGPC_Interp = (() => {
     out = stripInlineAsm(out);
     out = expandUserMacros(out);
     out = stripPreprocessor(out);
+    // Fast path: hoist large numeric asset bodies out before the rest of the
+    // rewrite pipeline walks them. The skeleton stays in place so the HW
+    // lints + the normal passes see a valid decl; the body is reinjected
+    // just before `return out`.
+    const { src: _fast, extracted: _arrays } = extractLargeArrays(out);
+    out = _fast;
+    // HW-1: near/far pointer mismatch. Needs NGP_FAR still visible in source,
+    // so runs BEFORE stripCC900Qualifiers. Only effective if NGP_FAR is not
+    // already stripped by macro expansion — see 0-5 for the preservation fix.
+    lintNgpFar(out, hwErrors);
+    // HW-2: `volatile` missing on ISR-shared globals. Needs `__interrupt`
+    // keyword still visible, so also runs BEFORE stripCC900Qualifiers.
+    lintIsrVolatile(out, hwErrors);
+    // If any lint populated `hwErrors` earlier in this compile, bail out now
+    // with a single structured exception. Caught by `run()` → formatted message
+    // shows in the editor log pane under the `err` filter.
+    if (hwErrors.length > 0) throw new HwFidelityError(hwErrors);
     out = stripCC900Qualifiers(out);  // __far/__near/__cdecl/__interrupt/NGP_FAR
     out = rewriteEnums(out);          // enum { A, B=5, C } → const lines
     out = rewriteSizeof(out);         // sizeof(u16) → 2, sizeof(int) → 2 (cc900)
@@ -1471,6 +1874,7 @@ const NGPC_Interp = (() => {
     out = wrapIntOps(out, intMap);        // u8/u16/etc overflow wrapping
     out = rewriteRegisters(out);
     if (hasVsync) out = makeMainGenerator(out);
+    out = reinjectArrays(out, _arrays);  // swap placeholders for bulk data
     return out;
   }
 

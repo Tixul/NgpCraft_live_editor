@@ -401,9 +401,16 @@ main {
 }
 .log-toolbar label { cursor: pointer; user-select: none; }
 .log-toolbar button {
-  margin-left: auto;
   font-size: 0.7rem;
   padding: 0.15rem 0.5rem;
+}
+/* First button in the toolbar gets the auto-margin so all buttons cluster
+ * on the right. Subsequent buttons follow via flex `gap`. */
+.log-toolbar button:first-of-type { margin-left: auto; }
+/* Subtle focus ring so users know #log accepts keyboard input (Ctrl+A). */
+#log:focus {
+  outline: 1px solid #3a6ea5;
+  outline-offset: -1px;
 }
 
 /* Log filter classes — applied to #log when a chip is off. */

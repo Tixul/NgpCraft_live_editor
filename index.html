@@ -148,9 +148,10 @@
         <label><input type="checkbox" id="log-filter-info" checked> info</label>
         <label><input type="checkbox" id="log-filter-err"  checked> err</label>
         <label><input type="checkbox" id="log-filter-audio" checked> audio</label>
+        <button id="log-copy-btn" class="toolbar-btn" type="button" title="Copy all log text (or Ctrl+A inside the log)">Copy</button>
         <button id="log-clear-btn" class="toolbar-btn" type="button">Clear</button>
       </div>
-      <pre id="log" aria-label="Log output"></pre>
+      <pre id="log" aria-label="Log output" tabindex="0"></pre>
 
       <details class="debug-panel" open>
         <summary>Hardware budget</summary>
