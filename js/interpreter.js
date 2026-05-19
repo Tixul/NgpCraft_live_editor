@@ -548,6 +548,78 @@ const NGPC_Interp = (() => {
     return out.join('\n');
   }
 
+  // HW-5 — silicon-broken TLCS-900 opcode inside an inline `__asm__` block.
+  //
+  // Hardware context: a few TLCS-900 opcode families crash or corrupt state
+  // on real NGPC silicon even though the assembler accepts them and the
+  // emulator interprets them. The two most recently confirmed cases:
+  //
+  //   • `<alu> WA, imm16` (encoding `D0 C8..CF lo hi`) — confirmed crash on
+  //     real NGPC 2026-05-20 (StarGunner Chantier 4 P-4 build). The Toshiba
+  //     cc900 compiler emits zero instances of this family in production
+  //     code. Use the byte-split pattern instead:
+  //         `ld HL, imm; <alu> A, L; <carry> W, H`
+  //
+  //   • `ld <XR>, XWA` working-bank long-register r+r (encoding
+  //     `D8 88..8F`, excluding the `cp r,r` exception `0xF0..0xF7`) —
+  //     confirmed broken via the 2026-05-20 toolchain↔emulator payoff:
+  //     `D8 8B` (= `ld XHL, XWA`) was emitted 114× in StarGunner before
+  //     the toolchain shipped the `_emit_copy_xwa_to_xhl` byte-split.
+  //     Use `push WA; pop HL; add A,L; adc W,H` instead.
+  //
+  // The live editor strips inline-asm before execution (see stripInlineAsm),
+  // so this lint runs BEFORE the strip pass to catch the patterns in user
+  // code. The detection is text-only (regex on TLCS-900 mnemonics) — it
+  // won't catch raw-byte forms like `.db 0xD0, 0xC8, …`, which are caught
+  // by the disassembler (NgpCraft_Disasm) at the build step.
+  function lintBrokenInlineAsmOpcodes(src, errors) {
+    // Inline-asm capture: parenthesised forms or block form.
+    const ASM_BLOCK_RE =
+      /\b(?:__asm__|__asm|asm|_asm)\s*(?:\(\s*("(?:\\.|[^"\\])*"(?:\s*,\s*"(?:\\.|[^"\\])*")*)\s*(?::[^)]*)?\)|\{([^}]*)\})/g;
+    const REGS_LD_BROKEN = ['XBC', 'XDE', 'XHL', 'XIX', 'XIY', 'XIZ', 'XSP'];
+    const LD_BROKEN = new RegExp(
+      `\\bld\\s+(${REGS_LD_BROKEN.join('|')})\\s*,\\s*XWA\\b`,
+      'gi'
+    );
+    const ALU_IMM_BROKEN = /\b(add|adc|sub|sbc|and|xor|or|cp)\s+WA\s*,\s*(0x[0-9a-f]+|[0-9]+)\b/gi;
+    let m;
+    while ((m = ASM_BLOCK_RE.exec(src)) !== null) {
+      const content = (m[1] || m[2] || '');
+      const baseLine = src.slice(0, m.index).split('\n').length;
+      let mi;
+      LD_BROKEN.lastIndex = 0;
+      while ((mi = LD_BROKEN.exec(content)) !== null) {
+        const dst = mi[1].toUpperCase();
+        errors.push({
+          rule: 'HW-5',
+          title: `silicon-broken inline-asm: \`ld ${dst}, XWA\``,
+          lines: [`Inline-asm block at line ${baseLine}: \`${mi[0]}\``],
+          why: `D8 prefix + working-bank long-register ALU r+r (sub-op 0x88..0x8F) ` +
+               `is broken on real NGPC silicon. cc900 emits the byte-split sequence ` +
+               `instead — verified 2026-05-20 toolchain↔emulator payoff (114 ` +
+               `instances eliminated from StarGunner).`,
+          fix: `Byte-split via stack: \`push WA; pop ${dst.slice(1)}; add A, L; adc W, H\` ` +
+               `(write your own copy or call \`_emit_copy_xwa_to_xhl\`-style helper).`,
+        });
+      }
+      ALU_IMM_BROKEN.lastIndex = 0;
+      while ((mi = ALU_IMM_BROKEN.exec(content)) !== null) {
+        const op = mi[1].toLowerCase();
+        const imm = mi[2];
+        errors.push({
+          rule: 'HW-5',
+          title: `silicon-broken inline-asm: \`${op} WA, ${imm}\``,
+          lines: [`Inline-asm block at line ${baseLine}: \`${mi[0]}\``],
+          why: `D0 prefix + ALU-imm sub-op (encoding D0 C8..CF lo hi) crashes ` +
+               `real NGPC silicon. CC900 emits zero instances of this family in ` +
+               `production code; HW crash confirmed 2026-05-20.`,
+          fix: `Byte-split: \`ld HL, ${imm}; ${op} A, L; ` +
+               `${op === 'sub' || op === 'sbc' || op === 'cp' ? 'sbc' : 'adc'} W, H\`.`,
+        });
+      }
+    }
+  }
+
   // HW-3b — loop variable declared inside `for (…)`.
   //
   // Hardware context: the `for (TYPE name = …; …; …)` init-declaration form
@@ -1927,6 +1999,9 @@ const NGPC_Interp = (() => {
     const userTypes = new Set([...TEMPLATE_TYPES, ...extractUserTypes(out)]);
     out = hoistFunctionStatics(out, userTypes);
     out = stripExternVarDecls(out);
+    // HW-5: silicon-broken inline-asm opcodes. Must run BEFORE stripInlineAsm
+    // because the strip rewrites the asm content to blank lines.
+    lintBrokenInlineAsmOpcodes(out, hwErrors);
     out = stripInlineAsm(out);
     out = expandUserMacros(out);
     out = stripPreprocessor(out);

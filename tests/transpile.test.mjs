@@ -129,6 +129,30 @@ const fixtures = [
     shouldCompile: true,
   },
 
+  // --- Lint: HW-5 (silicon-broken inline-asm opcodes) ----------------------
+  {
+    name: "HW-5 catches ld XHL, XWA inside __asm__",
+    c: 'void main(void) { __asm__("ld XHL, XWA"); }',
+    shouldCompile: false,
+    expectErrorRule: "HW-5",
+  },
+  {
+    name: "HW-5 catches add WA, imm inside __asm__",
+    c: 'void main(void) { __asm__("add WA, 0x0001"); }',
+    shouldCompile: false,
+    expectErrorRule: "HW-5",
+  },
+  {
+    name: "HW-5 stays quiet when inline-asm contains safe ops",
+    c: 'void main(void) { __asm__("ld HL, 1; add A, L; adc W, H"); }',
+    shouldCompile: true,
+  },
+  {
+    name: "HW-5 stays quiet when no inline-asm is present",
+    c: "void main(void) { /* ld XHL, XWA in a comment shouldn't trigger */ }",
+    shouldCompile: true,
+  },
+
   // --- StarGunner mini pattern (regression for HW-3d false positive) -------
   {
     name: "StarGunner pattern: decls at top of for-body (no false positive)",

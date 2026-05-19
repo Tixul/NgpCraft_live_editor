@@ -1,5 +1,20 @@
 # Changelog — NgpCraft Live Editor
 
+## 2026-05-20
+
+### Added
+
+- **HW-5 lint — silicon-broken inline-asm opcodes**: detects two TLCS-900
+  patterns inside `__asm__("…")` / `_asm { … }` blocks that crash on real
+  NGPC silicon:
+  - `ld <XR>, XWA` (D8 88..8F, working-bank long-register r+r) — recommends
+    the byte-split via stack (`push WA; pop <R>; add A, L; adc W, H`).
+  - `<alu> WA, imm` (D0 C8..CF) — recommends the cc900 byte-split
+    (`ld HL, imm; <alu> A, L; <carry> W, H`).
+  Mirrors NgpCraft_emulator `quirks_db.json` `2026-05-20.v4` and
+  NgpCraft_Disasm `MANUAL.md`. 4 fixture tests added to
+  `tests/transpile.test.mjs`.
+
 ## 2026-04-20
 
 A pass focused on making the editor a real, scriptable building block — not

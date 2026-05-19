@@ -206,6 +206,21 @@ Current rules:
   whose declared size exceeds 256 bytes. The NGPC stack is small (~512 bytes
   typical); larger locals overflow and corrupt return addresses on real
   silicon. Add `static` (move to BSS) or hoist to file scope.
+- **HW-5 — silicon-broken inline-asm opcode**: an `__asm__("…")` /
+  `_asm { … }` block that contains a TLCS-900 mnemonic the real NGPC
+  hardware miscompiles or crashes on. Two patterns trigger v1:
+  - `ld <XR>, XWA` (encoding `D8 88..8F`, working-bank long-register r+r)
+    — confirmed broken 2026-05-20 via the toolchain↔emulator payoff
+    (`D8 8B = ld XHL, XWA` emitted 114× in StarGunner before the
+    byte-split fix); use `push WA; pop <R>; add A, L; adc W, H`.
+  - `<alu> WA, imm` (encoding `D0 C8..CF lo hi`) — HW crash confirmed
+    2026-05-20 on `stargunner_j16_C4_phase4_BROKEN_HW_20260520.ngc`;
+    use `ld HL, imm; <alu> A, L; <carry> W, H`.
+
+  Mirrors the broken-set in NgpCraft_emulator `quirks_db.json`
+  `2026-05-20.v4` and the disassembler's `MANUAL.md` table. Raw-byte
+  forms (`.db 0xD0, 0xC8, …`) inside `__asm__` blocks are NOT caught
+  here — use `NgpCraft_Disasm` for that.
 
 A violation throws a `HwFidelityError` which the editor logs under the
 `err` filter. All bundled examples and the shmup bundle compile clean
