@@ -131,10 +131,13 @@ const fixtures = [
 
   // --- Lint: HW-5 (silicon-broken inline-asm opcodes) ----------------------
   {
-    name: "HW-5 catches ld XHL, XWA inside __asm__",
+    // HW-cleared 2026-07-05: `ld <XR>, XWA` r+r register copies are NOT
+    // silicon-broken (word D8 88..8F = retail mr_robot; long E8 88..8F is the
+    // confirmed-safe long family). The old HW-5 `ld` pattern was a false
+    // positive and was removed — this must now compile clean.
+    name: "HW-5 stays quiet on ld XHL, XWA (HW-confirmed working copy)",
     c: 'void main(void) { __asm__("ld XHL, XWA"); }',
-    shouldCompile: false,
-    expectErrorRule: "HW-5",
+    shouldCompile: true,
   },
   {
     name: "HW-5 catches add WA, imm inside __asm__",

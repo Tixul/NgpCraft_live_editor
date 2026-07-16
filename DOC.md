@@ -208,17 +208,35 @@ Current rules:
   silicon. Add `static` (move to BSS) or hoist to file scope.
 - **HW-5 — silicon-broken inline-asm opcode**: an `__asm__("…")` /
   `_asm { … }` block that contains a TLCS-900 mnemonic the real NGPC
-  hardware miscompiles or crashes on. Two patterns trigger v1:
-  - `ld <XR>, XWA` (encoding `D8 88..8F`, working-bank long-register r+r)
-    — confirmed broken 2026-05-20 via the toolchain↔emulator payoff
-    (`D8 8B = ld XHL, XWA` emitted 114× in StarGunner before the
-    byte-split fix); use `push WA; pop <R>; add A, L; adc W, H`.
-  - `<alu> WA, imm` (encoding `D0 C8..CF lo hi`) — HW crash confirmed
-    2026-05-20 on `stargunner_j16_C4_phase4_BROKEN_HW_20260520.ngc`;
+  hardware miscompiles or crashes on. One pattern triggers the lint:
+  - `<alu> WA, imm` emitted with a `0xD0` prefix (`D0 C8..CF lo hi`) — a
+    mis-encode, not a silicon defect: `0xD0..0xD7` is the word MEMORY
+    addressing family (HW-confirmed 2026-07-03), not a word-register
+    prefix, so it cannot encode a word-register ALU-imm. The earlier
+    "D0 ALU-imm silicon-broken" classification was a mis-decode of the
+    memory-family prefix. A build that emitted it still misbehaved on
+    `stargunner_j16_C4_phase4_BROKEN_HW_20260520.ngc` (2026-05-20);
     use `ld HL, imm; <alu> A, L; <carry> W, H`.
 
+  HW-cleared (no longer flagged): the `ld <XR>, XWA` working-bank r+r
+  register copy — and the wider `D8..DF` arith/logic + copy family
+  (sub-ops `0x80..0xF7`) — is NOT silicon-broken. `hw_test_addrr`
+  (2026-07-05, GREEN) plus the retail mr_robot boot confirm the `D8..DF`
+  word forms (`D8 88..8F`) and the `E8..EF` long forms execute cleanly;
+  only the operand *sizing* differs (`D8` = 16-bit word, `E8` = 32-bit
+  long). The former "`ld <XR>, XWA` confirmed broken" bullet was a false
+  positive and was removed from the lint 2026-07-05. Still broken in the
+  `D8..DF` family: shift-by-A (`0xF8..0xFF`) and the `0xB8..0xBF` gap; the
+  mul/div r+r (`0x40..0x5F`) was likewise cleared 2026-07-06
+  (`hw_test_muldiv`). The BYTE mul/div r+r family (prefix `C8..CF`, sub-op
+  `0x40..0x5F`; `CB 51 = div A, C`) was also cleared 2026-07-08
+  (`hw_test_bytediv`: `div A, C` with WA=0x1F64/C=0x64 → WA=0x2450). NUANCE:
+  the `CB` "C-source byte-ALU" family is sub-op-specific — byte mul/div is
+  SAFE, but `add A, C` (`CB 81`) remains a confirmed HW crash. Neither is
+  flagged here (HW-5 only covers the `0xD0`-prefix word ALU-immediate).
+
   Mirrors the broken-set in NgpCraft_emulator `quirks_db.json`
-  `2026-05-20.v4` and the disassembler's `MANUAL.md` table. Raw-byte
+  `2026-07-06` and the disassembler's `MANUAL.md` table. Raw-byte
   forms (`.db 0xD0, 0xC8, …`) inside `__asm__` blocks are NOT caught
   here — use `NgpCraft_Disasm` for that.
 

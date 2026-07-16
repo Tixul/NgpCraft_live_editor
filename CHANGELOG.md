@@ -1,5 +1,55 @@
 # Changelog — NgpCraft Live Editor
 
+## 2026-07-08
+
+### Fixed
+
+- **byte mul/div r+r reclassified as executable (not silicon-broken)** — the
+  BYTE register-to-register mul/div family (prefix `C8..CF`, sub-op
+  `0x40..0x5F`; canonical `CB 51 = div A, C`) is NOT silicon-broken. Hardware
+  test `hw_test_bytediv` on a real NGPC runs `div A, C` correctly
+  (WA=0x1F64 / C=0x64 → WA=0x2450). This parallels the WORD mul/div clearing
+  (`D8..DF`, 2026-07-06). NUANCE: the `CB` "C-source byte-ALU" family is
+  SUB-OP-SPECIFIC — `add A, C` (`CB 81`) IS a confirmed HW crash and stays
+  broken, but byte mul/div (`CB 0x40..0x5F`) are SAFE. No lint in this editor
+  ever flagged the byte `CB` family, `div A, C`/`CB 51`, or byte mul/div (the
+  HW-5 lint only covers the `0xD0`-prefix word ALU-immediate mis-encode, and
+  no `add A, C`/`CB 81` flag exists here), so no code change was needed — this
+  entry corrects the record. Mirrors NgpCraft_emulator `quirks_db.json`.
+
+## 2026-07-06
+
+### Fixed
+
+- **mul/div r+r reclassified as executable (not silicon-broken)** — the
+  `D8..DF` word register-to-register mul/div family (sub-op `0x40..0x5F`:
+  mul `0x40-47`, muls `0x48-4F`, div `0x50-57`, divs `0x58-5F`; canonical
+  `D9 50 = div WA, BC`) was previously listed as still-broken in the
+  2026-07-05 note below. Disproven on real hardware: test ROM
+  `hw_test_muldiv` on a real NGPC runs `div WA, BC` correctly
+  (XWA=0x000003E8 / BC=0x000A → XWA=0x00000064, quotient 100 remainder 0).
+  NOT silicon-broken. Parallels the 2026-07-05 `add r+r` clearing. No lint
+  in this editor ever flagged mul/div r+r (the HW-5 lint only covers the
+  `0xD0`-prefix ALU-immediate mis-encode), so no code change was needed —
+  this entry corrects the record. In the `D8..DF` WORD prefix family, only
+  **shift-by-A (`0xF8..0xFF`)** and the **`0xB8..0xBF` gap** remain
+  silicon-broken. The `0xD0`-prefix ALU-immediate mis-encode warning is
+  kept. Mirrors NgpCraft_emulator `quirks_db.json` `2026-07-06`.
+
+## 2026-07-05
+
+### Fixed
+
+- **HW-5 lint false positive removed** — the `ld <XR>, XWA` r+r register-copy
+  pattern no longer flags as silicon-broken. Hardware test (flashed
+  `hw_test_addrr`, 2026-07-05) plus the retail mr_robot boot confirm the
+  `D8..DF` word copies (`D8 88..8F`) and the `E8..EF` long copies execute
+  cleanly — neither hangs. Only the `D8..DF` mul/div r+r (`0x40..0x5F`) and
+  shift-by-A (`0xF8..0xFF`) remain broken, and the `0xD0`-prefix ALU-immediate
+  mis-encode warning is kept. The earlier "sub-op 0x80..0xFF hangs the CPU"
+  blanket rule (USER_MANUAL §12.1) is disproven. Mirrors NgpCraft_emulator
+  `quirks_db.json` `2026-07-05.v10`.
+
 ## 2026-05-20
 
 ### Added
