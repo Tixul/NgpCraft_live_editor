@@ -15,3 +15,4 @@ Thumbs.db
 # Local dev tools — paths hardcoded to local machine, not shareable as-is
 sync_android.py
 ANDROID_ROADMAP.md
+MISE_A_JOUR_2026-10.md
