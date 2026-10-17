@@ -8,7 +8,7 @@
 //   expectErrorRule — string: lint rule that must fire (e.g. 'HW-3b')
 //   shouldCompile   — boolean (default true): whether compile() should succeed
 //
-// Run with:  node --test tests/
+// Run with:  node --test "tests/*.test.mjs"   (Node 21+; `tests/` alone fails on Node 25)
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -199,6 +199,142 @@ const fixtures = [
       assert.equal(r.framebuffer.width, 160);
       assert.equal(r.framebuffer.height, 152);
       assert.equal(r.framebuffer.rgba.length, 160 * 152 * 4);
+    },
+  },
+
+  // --- HW-6: 8-bit arithmetic widened too late (each case measured with
+  //     `cc900 -S -O3 -Nb2`, 2026-10-18) ------------------------------------
+  {
+    name: "HW-6 catches u8 + u8 stored in u16 (Over Rev scenery)",
+    c: "u8 a; u8 b; u16 r; void main(void) { r = a + b; }",
+    expectErrorRule: "HW-6",
+  },
+  {
+    name: "HW-6 catches (u16)(u8 * 4u) (shift on 8 bits)",
+    c: "u8 a; u16 r; void main(void) { r = (u16)(a * 4u); }",
+    expectErrorRule: "HW-6",
+  },
+  {
+    name: "HW-6 catches (s16)(f() * 16) with f returning u8 (Ninja Gaiden)",
+    c: "static u8 floor_at(u16 x) { return (u8)x; }\n" +
+       "s16 y; void main(void) { y = (s16)(floor_at(41u) * 16); }",
+    expectErrorRule: "HW-6",
+  },
+  {
+    name: "HW-6 catches s16 = u8 - u8 (zero-extended)",
+    c: "u8 a; u8 b; s16 d; void main(void) { d = a - b; }",
+    expectErrorRule: "HW-6",
+  },
+  {
+    name: "HW-6 catches u16 += u8 + u8",
+    c: "u8 a; u8 b; u16 w; void main(void) { w += a + b; }",
+    expectErrorRule: "HW-6",
+  },
+  {
+    name: "HW-6 catches mul then add: u16 = ty * 20 + tx",
+    c: "u8 tx; u8 ty; u16 m; void main(void) { m = ty * 20 + tx; }",
+    expectErrorRule: "HW-6",
+  },
+  {
+    name: "HW-6 catches u8 array elements added into u16",
+    c: "u8 arr[4]; u16 w; void main(void) { w = arr[1] + arr[2]; }",
+    expectErrorRule: "HW-6",
+  },
+  {
+    name: "HW-6 catches (u16)(u8 << 9)",
+    c: "u8 a; u16 w; void main(void) { w = (u16)(a << 9); }",
+    expectErrorRule: "HW-6",
+  },
+  {
+    name: "HW-6 quiet on each-term casts, wide literal, lone MUL, cast-then-shift",
+    c: "u8 a; u8 b; u16 r1; u16 r2; u16 r3; u16 r4; u16 r5;\n" +
+       "void main(void) {\n" +
+       "  r1 = (u16)a + (u16)b;\n" +
+       "  r2 = (u16)(a + 300);\n" +
+       "  r3 = a * b;\n" +
+       "  r4 = (u16)(a * 100);\n" +
+       "  r5 = (u16)(a & 0x0Fu) << 9;\n" +
+       "}",
+    shouldCompile: true,
+  },
+  {
+    name: "HW-6 quiet when the target is 8-bit or operands are 16-bit",
+    c: "u8 a; u8 b; u8 c; u16 w; u16 v; void main(void) {\n" +
+       "  c = a + b;\n  c = (u8)(a + 1u);\n  w = v + 10u;\n  w = (u16)(v + a);\n}",
+    shouldCompile: true,
+  },
+
+  // --- HW-7: helpers that do not link / compute wrong ------------------------
+  {
+    name: "HW-7a catches s32 * s32 (C9H_mulls)",
+    c: "s32 x; s32 y; s32 r; void main(void) { r = x * y; }",
+    expectErrorRule: "HW-7a",
+  },
+  {
+    name: "HW-7a catches s32 * s16 and (s32)a * (s32)b",
+    c: "s32 x; s16 v; s16 a; s16 b; s32 r; s32 q;\n" +
+       "void main(void) { r = x * v; q = (s32)a * (s32)b; }",
+    expectErrorRule: "HW-7a",
+  },
+  {
+    name: "HW-7a quiet on s32 * constant and u16 * u16",
+    c: "s32 x; s32 r; u16 a; u16 b; u16 w; void main(void) { r = x * 3; w = a * b; }",
+    shouldCompile: true,
+  },
+  {
+    name: "HW-7b catches pointer subtraction on a 6-byte struct (C9H_divls)",
+    c: "typedef struct { u16 a; u16 b; u16 c; } T6;\n" +
+       "T6 *tp; T6 *tq; s16 d; void main(void) { d = (s16)(tp - tq); }",
+    expectErrorRule: "HW-7b",
+  },
+  {
+    name: "HW-7b quiet on u16* subtraction and 4-byte struct",
+    c: "typedef struct { u16 a; u16 b; } T4;\n" +
+       "u16 *p; u16 *q; T4 *tp; T4 *tq; s16 d; s16 e;\n" +
+       "void main(void) { d = (s16)(p - q); e = (s16)(tp - tq); }",
+    shouldCompile: true,
+  },
+  {
+    name: "HW-7c catches u32 % n (C9H_remlu)",
+    c: "u32 ux; u16 rm; void main(void) { rm = (u16)(ux % 7ul); }",
+    expectErrorRule: "HW-7c",
+  },
+  {
+    name: "HW-7c quiet on 16-bit modulo",
+    c: "u32 ux; u16 rm; void main(void) { rm = (u16)ux % (u16)7; }",
+    shouldCompile: true,
+  },
+
+  // --- A1: sysfont ink = palette colour 3 (BIOS SYSFONTSET ra3 = 3) -------
+  {
+    name: "sysfont text is drawn with palette colour 3, like the BIOS",
+    runFramesAssert: ({ Interp }) => {
+      // Colour 1 = red, colour 3 = green: the glyph must come out green only.
+      const r = Interp.runFrames(
+        `void main(void) {
+           ngpc_init();
+           ngpc_load_sysfont();
+           ngpc_gfx_set_bg_color(RGB(0, 0, 0));
+           ngpc_gfx_set_palette(GFX_SCR1, 0, RGB(0,0,0), RGB(15,0,0),
+                                RGB(0,0,15), RGB(0,15,0));
+           ngpc_gfx_clear(GFX_SCR1);
+           ngpc_text_print(GFX_SCR1, 0, 0, 0, "HHHH");
+           for(;;){ ngpc_vsync(); }
+         }`,
+        { frames: 2, captureFramebuffer: true }
+      );
+      assert.equal(r.ok, true, `runFrames failed: ${r.message ?? r.kind}`);
+      const { rgba, width } = r.framebuffer;
+      let green = 0, red = 0;
+      for (let y = 0; y < 8; y++) {
+        for (let x = 0; x < 32; x++) {
+          const i = (y * width + x) * 4;
+          if (rgba[i + 1] > 128 && rgba[i] < 64) green++;
+          if (rgba[i] > 128 && rgba[i + 1] < 64) red++;
+        }
+      }
+      assert.ok(green > 0, "text pixels must use palette colour 3 (green)");
+      assert.equal(red, 0, "no text pixel may use palette colour 1 (red)");
     },
   },
 

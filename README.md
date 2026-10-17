@@ -56,7 +56,8 @@ void main(void) {
     ngpc_load_sysfont();
     ngpc_gfx_set_bg_color(RGB(0, 0, 6));
     ngpc_gfx_set_palette(GFX_SCR1, 0,
-                         RGB(0,0,0), RGB(15,15,15), RGB(0,15,0), RGB(0,15,15));
+                         RGB(0,0,0), RGB(15,15,15), RGB(0,15,0), RGB(15,15,15));
+    /* the BIOS font draws with colour 3: text colour = colour 3 */
     ngpc_text_print(GFX_SCR1, 0, 4, 9, "Hello World");
 }
 ```

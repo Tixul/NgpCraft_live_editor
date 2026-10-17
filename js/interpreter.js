@@ -975,6 +975,562 @@ const NGPC_Interp = (() => {
     }
   }
 
+  // ---- cc900 arithmetic lints (HW-6, HW-7) -------------------------------
+  //
+  // cc900 does not follow the C integer promotions, and some 32-bit helpers
+  // it calls are missing from the link. Every case below was measured with
+  // `cc900 -S -O3 -Nb2` on a minimal fragment (2026-10-18); only the shapes
+  // proven wrong are flagged:
+  //
+  //   u16 r = a + b;          (a, b: u8)  → add A,(_b) ; extz WA   8-bit, WRONG
+  //   r = (u16)(a * 4u);                  → sll 2,A ; extz WA      8-bit, WRONG
+  //   s16 d = a - b;                      → sub A,(_b) ; extz WA   3-5 = 254, WRONG
+  //   r = (u16)(a << 9);                  → sll 9,A                always 0, WRONG
+  //   r = arr[1] + arr[2];    (u8 arr[])  → add A,(XBC+1)          8-bit, WRONG
+  //   r = (u16)a + (u16)b;                → extz ×2 ; add WA,BC    ok
+  //   r = (u16)(a + 300);                 → extz ; add WA,0x12c    ok (literal ≥ 256)
+  //   r = a * b;  r = a * 3;  a * 100     → mul WA,…               ok (16-bit MUL)
+  //   r = ty * 20 + tx;  r = a * b + c    → mul WA ; add A,(_tx)   8-bit add, WRONG
+  //   r = (u16)(a & 0x0F) << 9;           → extz ; sll 9,WA        ok
+  //   s32 * s32,  s32 * s16               → cal C9H_mulls          not linked
+  //   s32 * 3                             → inline adds            ok
+  //   u32 % 7ul                           → cal C9H_remlu          wrong on console
+  //   T6 *p - T6 *q   (sizeof T6 = 6)     → cal C9H_divls          not linked
+  //   u16 *p - u16 *q                     → shifts                 ok
+  //
+  // The editor evaluates everything in JS doubles, so all of these run
+  // "correctly" here — hence lints, not emulation.
+
+  const CC900_PRIM = {
+    u8:  { b: 8,  s: false }, s8:  { b: 8,  s: true }, char: { b: 8, s: true },
+    u_char: { b: 8, s: false },
+    u16: { b: 16, s: false }, s16: { b: 16, s: true }, short: { b: 16, s: true },
+    int: { b: 16, s: true }, unsigned: { b: 16, s: false }, signed: { b: 16, s: true },
+    u_short: { b: 16, s: false },
+    u32: { b: 32, s: false }, s32: { b: 32, s: true }, long: { b: 32, s: true },
+    u_long: { b: 32, s: false },
+  };
+  const CC900_MULTIWORD = {
+    'unsigned char': 'u8', 'signed char': 's8',
+    'unsigned short': 'u16', 'signed short': 's16', 'short int': 's16',
+    'unsigned short int': 'u16', 'unsigned int': 'u16', 'signed int': 's16',
+    'unsigned long': 'u32', 'signed long': 's32', 'long int': 's32',
+    'unsigned long int': 'u32',
+  };
+  const CC900_QUALIFIERS = /^(?:const|volatile|static|register|extern|__far|__near|NGP_FAR|NGP_NEAR)$/;
+  const CC900_KEYWORDS = new Set(['return', 'if', 'else', 'while', 'for', 'do',
+    'switch', 'case', 'default', 'break', 'continue', 'goto', 'sizeof',
+    'struct', 'union', 'enum', 'typedef', 'void']);
+
+  function tokenizeC(src) {
+    const raw = [];
+    const re = /\s+|("(?:\\.|[^"\\\n])*")|('(?:\\.|[^'\\\n])*')|(0[xX][0-9a-fA-F]+[uUlL]*|\d+[uUlL]*)|([A-Za-z_]\w*)|(<<=|>>=|->|\+\+|--|<<|>>|<=|>=|==|!=|&&|\|\||[-+*\/%&|^]=|[^\s])/g;
+    let m;
+    while ((m = re.exec(src)) !== null) {
+      if (m[1]) raw.push({ t: 'str', v: m[1], i: m.index });
+      else if (m[2]) raw.push({ t: 'chr', v: m[2], i: m.index });
+      else if (m[3]) raw.push({ t: 'num', v: m[3], i: m.index });
+      else if (m[4]) raw.push({ t: 'id', v: m[4], i: m.index });
+      else if (m[5]) raw.push({ t: 'op', v: m[5], i: m.index });
+    }
+    // Merge multi-word primitive types into their template name.
+    const toks = [];
+    for (let k = 0; k < raw.length; k++) {
+      const t = raw[k];
+      if (t.t === 'id' && /^(?:unsigned|signed|short|long)$/.test(t.v)) {
+        let words = [t.v];
+        let j = k + 1;
+        while (raw[j] && raw[j].t === 'id' && /^(?:char|short|int|long)$/.test(raw[j].v)) {
+          words.push(raw[j].v); j++;
+        }
+        const joined = words.join(' ');
+        if (words.length > 1 && CC900_MULTIWORD[joined]) {
+          toks.push({ t: 'id', v: CC900_MULTIWORD[joined], i: t.i });
+          k = j - 1;
+          continue;
+        }
+      }
+      toks.push(t);
+    }
+    return toks;
+  }
+
+  function matchClose(toks, k) {
+    const open = toks[k].v;
+    const close = open === '(' ? ')' : open === '[' ? ']' : '}';
+    let depth = 0;
+    for (let j = k; j < toks.length; j++) {
+      if (toks[j].v === open) depth++;
+      else if (toks[j].v === close && --depth === 0) return j;
+    }
+    return -1;
+  }
+  function matchOpenBackward(toks, k) {
+    const close = toks[k].v;
+    const open = close === ')' ? '(' : '[';
+    let depth = 0;
+    for (let j = k; j >= 0; j--) {
+      if (toks[j].v === close) depth++;
+      else if (toks[j].v === open && --depth === 0) return j;
+    }
+    return -1;
+  }
+
+  // name → { type, ptr, arr, fn } ; null when the name is declared with
+  // different types in different places (shadowing) — then the lints skip it.
+  function buildCSymbols(toks, userTypes) {
+    const sym = new Map();
+    const structSizes = new Map();
+    const isTypeName = (t) => t && t.t === 'id' && (CC900_PRIM[t.v] || userTypes.has(t.v));
+    const add = (name, info) => {
+      const key = `${info.type}|${info.ptr}|${info.arr}|${info.fn}`;
+      if (!sym.has(name)) sym.set(name, Object.assign({ key }, info));
+      else if (sym.get(name) && sym.get(name).key !== key) sym.set(name, null);
+    };
+    for (let k = 0; k < toks.length; k++) {
+      // typedef struct { fields } Name;  → element size, packed and 2-aligned.
+      if (toks[k].v === 'typedef' && toks[k + 1] && toks[k + 1].v === 'struct') {
+        let j = k + 2;
+        if (toks[j] && toks[j].t === 'id' && toks[j + 1] && toks[j + 1].v === '{') j++;
+        if (toks[j] && toks[j].v === '{') {
+          const close = matchClose(toks, j);
+          const nameTok = toks[close + 1];
+          if (close > 0 && nameTok && nameTok.t === 'id') {
+            structSizes.set(nameTok.v, structSizeOf(toks, j + 1, close));
+          }
+        }
+      }
+      if (!isTypeName(toks[k])) continue;
+      const base = toks[k].v;
+      let j = k + 1;
+      for (;;) {
+        let stars = 0;
+        while (toks[j] && (toks[j].v === '*' || CC900_QUALIFIERS.test(toks[j].v))) {
+          if (toks[j].v === '*') stars++;
+          j++;
+        }
+        const nameTok = toks[j];
+        if (!nameTok || nameTok.t !== 'id' || isTypeName(nameTok) ||
+            CC900_KEYWORDS.has(nameTok.v)) break;
+        const next = toks[j + 1];
+        const info = { type: base, ptr: stars, arr: !!next && next.v === '[',
+                       fn: !!next && next.v === '(' };
+        add(nameTok.v, info);
+        if (info.fn) break;
+        // Skip the initializer / array size up to the next top-level ',' or ';'.
+        let depth = 0;
+        for (j++; j < toks.length; j++) {
+          const v = toks[j].v;
+          if (v === '(' || v === '[' || v === '{') depth++;
+          else if (v === ')' || v === ']' || v === '}') { if (depth === 0) break; depth--; }
+          else if (depth === 0 && (v === ',' || v === ';')) break;
+        }
+        if (!toks[j] || toks[j].v !== ',') break;
+        j++;
+        if (isTypeName(toks[j])) break;  // parameter list: next one has its own type
+      }
+    }
+    return { sym, structSizes };
+  }
+
+  // { packed, aligned } byte size of a struct body, or null if a field type
+  // is not a primitive / pointer (nested structs, bitfields…).
+  function structSizeOf(toks, a, b) {
+    let packed = 0, aligned = 0;
+    let k = a;
+    while (k < b) {
+      let j = k;
+      while (j < b && CC900_QUALIFIERS.test(toks[j].v)) j++;
+      const prim = CC900_PRIM[toks[j] && toks[j].v];
+      if (!prim) return null;
+      j++;
+      for (;;) {
+        let ptr = false;
+        while (j < b && toks[j].v === '*') { ptr = true; j++; }
+        if (!(toks[j] && toks[j].t === 'id')) return null;
+        j++;
+        let count = 1;
+        while (toks[j] && toks[j].v === '[') {
+          const n = toks[j + 1] && toks[j + 1].t === 'num' ? parseInt(toks[j + 1].v, 0) : NaN;
+          if (!(n > 0) || toks[j + 2].v !== ']') return null;
+          count *= n; j += 3;
+        }
+        if (toks[j] && toks[j].v === ':') return null;  // bitfield
+        const size = (ptr ? 4 : prim.b / 8) * count;
+        packed += size;
+        if (size > 1 && (aligned & 1)) aligned++;
+        aligned += size;
+        if (toks[j] && toks[j].v === ',') { j++; continue; }
+        break;
+      }
+      if (!toks[j] || toks[j].v !== ';') return null;
+      k = j + 1;
+    }
+    if (aligned & 1) aligned++;
+    return { packed, aligned };
+  }
+
+  const CLS_UNK = { k: 'unk' };
+  function clsOfType(type, ptr) {
+    if (ptr > 0) return { k: 'ptr', pointee: type, ptr };
+    const p = CC900_PRIM[type];
+    if (!p) return CLS_UNK;
+    return { k: p.b === 8 ? 'n' : 'w', bits: p.b, signed: p.s };
+  }
+  function parseCNumber(v) {
+    const n = parseInt(v.replace(/[uUlL]+$/, ''), 0);
+    return { k: 'lit', val: n, bits: /l/i.test(v) || n > 0xFFFF ? 32 : 16 };
+  }
+  function isCastAt(toks, k, close, ctx) {
+    // ( TYPE [*...] )
+    if (close <= k + 1) return null;
+    const t = toks[k + 1];
+    if (!(t.t === 'id' && (CC900_PRIM[t.v] || ctx.userTypes.has(t.v)))) return null;
+    let stars = 0;
+    for (let j = k + 2; j < close; j++) {
+      if (toks[j].v === '*') stars++;
+      else if (!CC900_QUALIFIERS.test(toks[j].v)) return null;
+    }
+    return { type: t.v, ptr: stars };
+  }
+
+  // Parse one operand at toks[k] (bounded by `end`) → { cls, end }.
+  function parseCOperand(toks, k, end, ctx) {
+    if (k >= end) return null;
+    const t = toks[k];
+    if (t.t === 'op') {
+      if (t.v === '-' || t.v === '+' || t.v === '~' || t.v === '!' ||
+          t.v === '++' || t.v === '--' || t.v === '*' || t.v === '&') {
+        const r = parseCOperand(toks, k + 1, end, ctx);
+        if (!r) return null;
+        let cls = r.cls;
+        if (t.v === '!' || t.v === '*' || t.v === '&') cls = CLS_UNK;
+        else if (t.v === '-' && cls.k === 'lit') cls = { k: 'lit', val: -cls.val, bits: cls.bits };
+        return { cls, end: r.end };
+      }
+      if (t.v === '(') {
+        const close = matchClose(toks, k);
+        if (close < 0 || close >= end) return null;
+        const cast = isCastAt(toks, k, close, ctx);
+        if (cast) {
+          const r = parseCOperand(toks, close + 1, end, ctx);
+          if (!r) return null;
+          return { cls: clsOfType(cast.type, cast.ptr), end: r.end, cast: true };
+        }
+        const inner = analyzeCRange(toks, k + 1, close, ctx);
+        return parseCPostfix(toks, close + 1, end, inner.group, ctx);
+      }
+      return null;
+    }
+    if (t.t === 'num') return { cls: parseCNumber(t.v), end: k + 1 };
+    if (t.t === 'chr') return { cls: { k: 'lit', val: 0, bits: 16 }, end: k + 1 };
+    if (t.t === 'str') return { cls: CLS_UNK, end: k + 1 };
+    if (t.t === 'id') {
+      if (t.v === 'sizeof') {
+        if (toks[k + 1] && toks[k + 1].v === '(') {
+          const close = matchClose(toks, k + 1);
+          return close > 0 ? { cls: CLS_UNK, end: close + 1 } : null;
+        }
+        return null;
+      }
+      const info = ctx.sym.get(t.v);
+      let j = k + 1;
+      let cls;
+      if (toks[j] && toks[j].v === '(' && j < end) {
+        const close = matchClose(toks, j);
+        if (close < 0 || close >= end) return null;
+        cls = info && info.fn ? clsOfType(info.type, info.ptr) : CLS_UNK;
+        j = close + 1;
+      } else if (!info || info.fn) {
+        cls = CLS_UNK;
+      } else {
+        cls = clsOfType(info.type, info.ptr + (info.arr ? 1 : 0));
+      }
+      return parseCPostfix(toks, j, end, cls, ctx);
+    }
+    return null;
+  }
+  function parseCPostfix(toks, j, end, cls, ctx) {
+    while (j < end) {
+      const v = toks[j].v;
+      if (v === '[') {
+        const close = matchClose(toks, j);
+        if (close < 0 || close >= end) return null;
+        cls = cls.k === 'ptr' ? clsOfType(cls.pointee, cls.ptr - 1) : CLS_UNK;
+        j = close + 1;
+      } else if (v === '.' || v === '->') {
+        cls = CLS_UNK; j += 2;
+      } else if (v === '++' || v === '--') {
+        j++;
+      } else break;
+    }
+    return { cls, end: j };
+  }
+
+  const C_BINOPS = new Set(['+', '-', '*', '/', '%', '<<', '>>', '&', '|', '^',
+    '<', '>', '<=', '>=', '==', '!=', '&&', '||']);
+  // Split toks[a..b) into operands and top-level binary operators.
+  function analyzeCRange(toks, a, b, ctx) {
+    const operands = [], ops = [];
+    let complex = false;
+    let k = a;
+    while (k < b) {
+      const r = parseCOperand(toks, k, b, ctx);
+      if (!r) { complex = true; break; }
+      operands.push(r.cls);
+      k = r.end;
+      if (k >= b) break;
+      const op = toks[k];
+      if (op.t !== 'op' || !C_BINOPS.has(op.v)) { complex = true; break; }
+      ops.push(op.v);
+      k++;
+    }
+    let group = CLS_UNK;
+    if (!complex && operands.length > 0 &&
+        !ops.some(o => /^(?:<|>|<=|>=|==|!=|&&|\|\|)$/.test(o))) {
+      if (operands.length === 1) group = operands[0];
+      else if (operands.every(c => c.k === 'n' || c.k === 'lit')) {
+        group = operands.some(c => c.k === 'n')
+          ? { k: 'n', bits: 8, signed: operands.some(c => c.signed) }
+          : { k: 'lit', val: NaN, bits: 16 };
+      } else if (operands.every(c => c.k === 'n' || c.k === 'w' || c.k === 'lit')) {
+        const bits = Math.max(...operands.map(c => c.bits || 16));
+        group = { k: 'w', bits, signed: operands.some(c => c.signed) };
+      }
+    }
+    return { operands, ops, complex, group };
+  }
+
+  // The operator of `an` that cc900 computes on 8 bits, or null.
+  function narrowArithOp(an) {
+    if (an.complex || an.ops.length === 0) return null;
+    if (!an.ops.every(o => o === '+' || o === '-' || o === '*' || o === '<<')) return null;
+    let hasNarrow = false;
+    for (const c of an.operands) {
+      if (c.k === 'n') hasNarrow = true;
+      // A literal >= 256 makes cc900 widen the whole operation (measured).
+      else if (c.k !== 'lit' || !(c.val >= 0 && c.val < 256)) return null;
+    }
+    if (!hasNarrow) return null;
+    // `a * b` / `a * 20` ALONE use the 16-bit MUL and are right; but a `+`
+    // after it is done on 8 bits and drops the high byte of the product
+    // (measured: `mul WA,0x14` then `add A,(_tx)`). So any + - << flags.
+    for (let i = 0; i < an.ops.length; i++) {
+      const o = an.ops[i], L = an.operands[i], R = an.operands[i + 1];
+      if (o === '+' || o === '-') return o;
+      if (o === '<<' && L.k === 'n') return o;
+      if (o === '*') {
+        const lit = L.k === 'lit' ? L : R.k === 'lit' ? R : null;
+        if (lit && lit.val >= 2 && (lit.val & (lit.val - 1)) === 0) return o;
+      }
+    }
+    return null;
+  }
+
+  function cLineOf(src, idx) {
+    let n = 1;
+    for (let i = 0; i < idx; i++) if (src.charCodeAt(i) === 10) n++;
+    return n;
+  }
+  function cTextOf(src, toks, a, b) {
+    const last = toks[b - 1];
+    return src.slice(toks[a].i, last.i + last.v.length).replace(/\s+/g, ' ');
+  }
+
+  // HW-6 — 8-bit arithmetic widened too late (cc900 skips integer promotion).
+  //
+  // Contexts checked (where a wide result is expected):
+  //   (WIDE)( expr )            explicit widening cast of a parenthesised expr
+  //   wide_var = / += / -= expr
+  // Not checked yet: function arguments, return values.
+  function lintNarrowArith(src, toks, ctx, errors) {
+    const seen = new Set();
+    const report = (k, a, b, op) => {
+      const line = cLineOf(src, toks[k].i);
+      const key = `HW-6|${line}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      const text = cTextOf(src, toks, k, b + (toks[b] && toks[b].v === ')' ? 1 : 0));
+      const what = op === '<<' ? 'shift' : op === '*' ? 'multiply by a power of two' :
+                   op === '-' ? 'subtraction' : 'addition';
+      errors.push({
+        rule: 'HW-6',
+        title: `8-bit ${what} widened too late — \`${text.slice(0, 60)}\``,
+        lines: [`Line ${line}: ${text.slice(0, 80)}`],
+        why: 'cc900 does NOT promote u8/s8 operands to int. `+`, `-`, `<<` and ' +
+             '`* 2^n` are computed on 8 bits and only the result is widened ' +
+             '(cc900 -S: `add A,(_b)` then `extz WA`). Carry is lost: 200 + 100 ' +
+             'gives 44, 3 - 5 gives 254, `a << 9` gives 0. The editor computes ' +
+             'in JS numbers, so the bug is invisible here. Real cases: Over Rev ' +
+             '(scenery frozen above 96 mph), Ninja Gaiden (`u8 * 16`, hero invisible).',
+        fix: 'Widen EACH operand before the operation: `(u16)a + (u16)b`, ' +
+             '`(s16)a - (s16)b`, `(u16)a << 9`, `(u16)ty * 20u + tx`. ' +
+             '(`a * b` or `a * 3` ALONE is fine: cc900 uses its 16-bit MUL — ' +
+             'but a `+` after it is again done on 8 bits.)',
+      });
+    };
+    for (let k = 0; k < toks.length; k++) {
+      const t = toks[k];
+      // (A) (WIDE)( expr )
+      if (t.v === '(' && toks[k + 2] && toks[k + 2].v === ')' &&
+          toks[k + 3] && toks[k + 3].v === '(') {
+        const p = CC900_PRIM[toks[k + 1].v];
+        if (p && p.b > 8) {
+          const close = matchClose(toks, k + 3);
+          if (close > 0) {
+            const op = narrowArithOp(analyzeCRange(toks, k + 4, close, ctx));
+            if (op) report(k, k + 4, close, op);
+          }
+        }
+      }
+      // (B) wide_var = expr ;   wide_var += expr ;
+      if (t.t === 'id' && toks[k + 1] && /^(?:=|\+=|-=)$/.test(toks[k + 1].v)) {
+        const prev = toks[k - 1];
+        if (prev && (prev.v === '.' || prev.v === '->')) continue;
+        const info = ctx.sym.get(t.v);
+        if (!info || info.ptr || info.arr || info.fn) continue;
+        const p = CC900_PRIM[info.type];
+        if (!p || p.b <= 8) continue;
+        let depth = 0, j = k + 2;
+        for (; j < toks.length; j++) {
+          const v = toks[j].v;
+          if (v === '(' || v === '[' || v === '{') depth++;
+          else if (v === ')' || v === ']' || v === '}') { if (depth === 0) break; depth--; }
+          else if (depth === 0 && (v === ';' || v === ',')) break;
+        }
+        const op = narrowArithOp(analyzeCRange(toks, k + 2, j, ctx));
+        if (op) report(k, k + 2, j, op);
+      }
+    }
+  }
+
+  // Class of the operand just left of the binary operator at toks[k].
+  function leftCOperand(toks, k, ctx) {
+    let j = k - 1;
+    const t = toks[j];
+    if (!t) return CLS_UNK;
+    let start;
+    if (t.t === 'id' || t.t === 'num') start = j;
+    else if (t.v === ')' || t.v === ']') {
+      start = matchOpenBackward(toks, j);
+      if (start < 0) return CLS_UNK;
+      // Walk back over call / index chains: f(...)  a[...][...]
+      while (start > 0 && (toks[start - 1].t === 'id' || toks[start - 1].v === ']')) {
+        if (toks[start - 1].t === 'id') { start--; break; }
+        start = matchOpenBackward(toks, start - 1);
+        if (start < 0) return CLS_UNK;
+      }
+    } else return CLS_UNK;
+    // Preceded by a cast `(TYPE)`?
+    if (toks[start - 1] && toks[start - 1].v === ')') {
+      const open = matchOpenBackward(toks, start - 1);
+      const cast = open >= 0 ? isCastAt(toks, open, start - 1, ctx) : null;
+      if (cast) return clsOfType(cast.type, cast.ptr);
+    }
+    const prev = toks[start - 1];
+    if (prev && (prev.v === '.' || prev.v === '->')) return CLS_UNK;
+    const r = parseCOperand(toks, start, k, ctx);
+    return r && r.end === k ? r.cls : CLS_UNK;
+  }
+  function rightCOperand(toks, k, ctx) {
+    const r = parseCOperand(toks, k + 1, toks.length, ctx);
+    return r ? r.cls : CLS_UNK;
+  }
+  function isBinaryAt(toks, k) {
+    const p = toks[k - 1];
+    if (!p) return false;
+    if (p.t === 'num' || p.t === 'chr') return true;
+    if (p.t === 'id') return !CC900_KEYWORDS.has(p.v) && !CC900_PRIM[p.v];
+    return p.v === ')' || p.v === ']' || p.v === '++' || p.v === '--';
+  }
+
+  // HW-7 — code that runs here but does not link (or computes wrong) in a ROM.
+  //   HW-7a  s32 * s32 / s32 * s16      → C9H_mulls, unresolved (TULINK-Error-209)
+  //   HW-7b  struct pointer subtraction → C9H_divls, unresolved, when the
+  //          element size is not a power of two
+  //   HW-7c  32-bit modulo              → C9H_remlu / remls, wrong results on
+  //          console (ngpc_random, menu_kuroi_dokutsu 2026-04-23)
+  function lintCc900Helpers(src, toks, ctx, errors) {
+    const seen = new Set();
+    const push = (rule, k, e) => {
+      const line = cLineOf(src, toks[k].i);
+      const key = `${rule}|${line}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      const ls = src.lastIndexOf('\n', toks[k].i) + 1;
+      const le = src.indexOf('\n', toks[k].i);
+      const text = src.slice(ls, le === -1 ? src.length : le).trim();
+      errors.push(Object.assign({ rule, lines: [`Line ${line}: ${text.slice(0, 80)}`] }, e));
+    };
+    const isS32 = (c) => c.k === 'w' && c.bits === 32 && c.signed;
+    const isU32 = (c) => c.k === 'w' && c.bits === 32 && !c.signed;
+    for (let k = 1; k < toks.length; k++) {
+      const v = toks[k].v;
+      if (toks[k].t !== 'op') continue;
+      const compound = v === '*=' || v === '%=';
+      if (!compound && !((v === '*' || v === '%' || v === '-') && isBinaryAt(toks, k))) continue;
+      let L, R;
+      if (compound) {
+        const info = toks[k - 1].t === 'id' ? ctx.sym.get(toks[k - 1].v) : null;
+        L = info && !info.fn ? clsOfType(info.type, info.ptr + (info.arr ? 1 : 0)) : CLS_UNK;
+      } else {
+        L = leftCOperand(toks, k, ctx);
+      }
+      R = rightCOperand(toks, k, ctx);
+      const op = compound ? v[0] : v;
+      if (op === '*') {
+        const known = (c) => c.k === 'n' || c.k === 'w';
+        if ((isS32(L) && known(R) && !isU32(R)) || (isS32(R) && known(L) && !isU32(L))) {
+          push('HW-7a', k, {
+            title: 'signed 32-bit multiply — needs C9H_mulls, which does not link',
+            why: 'cc900 turns `s32 * s32` (and `s32 * s16`) into a call to ' +
+                 'C9H_mulls. That helper lives only in system.lib, which the ' +
+                 'template does not link: the ROM build stops with ' +
+                 'TULINK-Error-209 "unresolved external symbol C9H_mulls".',
+            fix: 'Stay in s16 when the values allow it (cc900 then uses the ' +
+                 'hardware MUL), or call `ngpc_mul32(a, b)`. `s32 * 3` (constant) is fine.',
+          });
+        }
+      } else if (op === '%') {
+        const wide32 = (c) => (c.k === 'w' || c.k === 'lit') && c.bits === 32;
+        if (wide32(L) || wide32(R)) {
+          push('HW-7c', k, {
+            title: '32-bit modulo — calls C9H_remlu / C9H_remls',
+            why: 'cc900 compiles a 32-bit `%` into a runtime helper call. On ' +
+                 'console the result came out unreduced (ngpc_random in ' +
+                 'menu_kuroi_dokutsu: values 0..32767 instead of 0..max).',
+            fix: 'Reduce to 16 bits first: `(u16)x % (u16)n`, or use ' +
+                 '`ngpc_qrandom()` (u8) for gameplay randomness.',
+          });
+        }
+      } else if (op === '-' && !compound && L.k === 'ptr' && R.k === 'ptr' &&
+                 L.ptr === 1 && R.ptr === 1 && L.pointee === R.pointee) {
+        const size = ctx.structSizes.get(L.pointee);
+        const pow2 = (n) => n > 0 && (n & (n - 1)) === 0;
+        if (size && !pow2(size.packed) && !pow2(size.aligned)) {
+          push('HW-7b', k, {
+            title: `pointer subtraction on ${L.pointee} (${size.packed} bytes) — needs C9H_divls`,
+            why: 'Subtracting two pointers divides the byte distance by the ' +
+                 'element size. When that size is not a power of two, cc900 ' +
+                 'calls C9H_divls, which the template does not link ' +
+                 '(TULINK-Error-209).',
+            fix: 'Keep an index next to the pointer, or compare the pointers ' +
+                 'instead of subtracting them.',
+          });
+        }
+      }
+    }
+  }
+
+  // Entry point for HW-6 / HW-7: one tokenisation + symbol table for both.
+  function lintCc900Arith(src, userTypes, errors) {
+    const toks = tokenizeC(src);
+    const { sym, structSizes } = buildCSymbols(toks, userTypes);
+    const ctx = { sym, structSizes, userTypes };
+    lintNarrowArith(src, toks, ctx, errors);
+    lintCc900Helpers(src, toks, ctx, errors);
+  }
+
   // Strip cc900-specific qualifier keywords so the remaining passes don't
   // have to know about them. All are compile-time hints that don't affect
   // runtime semantics in a JS-transpiled emulator:
@@ -2010,6 +2566,10 @@ const NGPC_Interp = (() => {
     // HW-2: `volatile` missing on ISR-shared globals. Needs `__interrupt`
     // keyword still visible, so also runs BEFORE stripCC900Qualifiers.
     lintIsrVolatile(out, hwErrors);
+    // HW-6 / HW-7: cc900 arithmetic (8-bit ops widened too late, missing
+    // 32-bit helpers). Runs after macro expansion so `FX_MUL(a,b)` and
+    // friends are seen in their expanded form.
+    lintCc900Arith(out, userTypes, hwErrors);
     // If any lint populated `hwErrors` earlier in this compile, bail out now
     // with a single structured exception. Caught by `run()` → formatted message
     // shows in the editor log pane under the `err` filter.

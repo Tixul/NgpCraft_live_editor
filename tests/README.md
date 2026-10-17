@@ -6,10 +6,10 @@ Fixture-based regression tests for the C → JS transpiler in `js/interpreter.js
 
 ```bash
 cd NgpCraft_live_editor
-node --test tests/
+node --test "tests/*.test.mjs"
 ```
 
-Requires Node 20+ (for `node:test` built-in). No external dependencies.
+Requires Node 21+ (for `node:test` built-in). No external dependencies.
 
 ## Adding a fixture
 

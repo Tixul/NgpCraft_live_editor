@@ -2,8 +2,9 @@
 //
 // The byte data lives in js/font_data.js as hex strings. We parse each entry
 // once into a Uint8Array of 16 bytes matching the NGPC 2bpp packed tile layout
-// (K2GETechRef §4-3-5-1). Tile data uses color index 1 for lit pixels and 0
-// for background (transparent on scroll planes per K2GE).
+// (K2GETechRef §4-3-5-1). Tile data uses color index 3 for lit pixels and 0
+// for background (transparent on scroll planes per K2GE) — same as the real
+// BIOS, which ngpc_load_sysfont() calls with ra3 = 3 (low nibble = ink).
 //
 // On real hardware the BIOS SYSFONTSET loads a proprietary font we can't
 // redistribute; our substitute is rendered from Liberation Mono at 8px. The

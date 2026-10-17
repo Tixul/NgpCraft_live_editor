@@ -86,8 +86,10 @@
     cpuValueEl.textContent = `${s.opsThisFrame} / ${s.FRAME_BUDGET}`;
     cpuValueEl.classList.toggle('over', pct >= 100);
     if (pct >= 100) log(
-      `CPU budget exceeded: ${s.opsThisFrame} memory ops (hw limit ~${s.FRAME_BUDGET}). ` +
-      `On real NGPC, main loop would miss VBlank here.`, 'err');
+      `CPU estimate exceeded: ${s.opsThisFrame} memory ops counted this frame ` +
+      `(rough ceiling ${s.FRAME_BUDGET}; the real CPU has ~51 000 states per frame ` +
+      `and most instructions take 4+). On real NGPC the main loop would miss ` +
+      `VBlank here — and may already do so below this ceiling.`, 'err');
 
     const wdPct = Math.min(100, (s.watchdogLastPet / WATCHDOG_RESET_FRAMES) * 100);
     wdFillEl.style.width = `${wdPct.toFixed(1)}%`;

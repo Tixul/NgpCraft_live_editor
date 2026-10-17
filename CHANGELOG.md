@@ -1,5 +1,39 @@
 # Changelog — NgpCraft Live Editor
 
+## 2026-10-18
+
+### Fixed
+
+- **System font ink moved from palette colour 1 to colour 3** — the real BIOS
+  `SYSFONTSET` is called with `ra3 = 3` by `ngpc_load_sysfont()`, so on
+  hardware text is drawn with colour 3. The editor used colour 1: the README
+  Hello World came out white here and cyan on console. `sync_font.py` now has
+  `INK_INDEX = 3`, writes UTF-8 and re-emits the `globalThis` export (both
+  were lost on regeneration). Examples, starter, README and DOC put the text
+  colour at index 3 (and keep it at 1). Regression test added.
+- **CPU meter wording** — the counter is memory accesses, not cycles; a frame
+  holds ~51 000 Toshiba states (1 state = 2 clock periods). The 100 000
+  ceiling is now labelled as a rough estimate (UI label, warning, comment).
+- **Two examples were wrong on real hardware** (found by HW-6):
+  `png-assets` (`map_i = ty * 20 + tx`, wrong map index from row 13 on) and
+  the StarGunner bundle (`(u16)(pal_idx * 4u)`). Both now widen first.
+- `tests/README.md`: `node --test tests/` fails on Node 25; use
+  `node --test "tests/*.test.mjs"`.
+
+### Added
+
+- **HW-6 — 8-bit arithmetic widened too late.** cc900 does not apply the C
+  integer promotions: `u8 + u8`, `u8 - u8`, `u8 << n`, `u8 * 2^n`, and any
+  `+` after a product are computed on 8 bits, then widened. Flagged in
+  `(WIDE)(expr)` casts and `wide = / += / -= expr`. Every flagged and
+  unflagged shape was measured with `cc900 -S -O3 -Nb2` (table in
+  `interpreter.js`, above `CC900_PRIM`).
+- **HW-7 — code that does not link or computes wrong in a ROM.**
+  HW-7a `s32 * s32` / `s32 * s16` (`C9H_mulls`, TULINK-Error-209);
+  HW-7b pointer subtraction on a struct whose size is not a power of two
+  (`C9H_divls`); HW-7c 32-bit `%` (`C9H_remlu`, wrong results on console).
+- 17 new test fixtures (positive + negative per measured case): 44 total.
+
 ## 2026-07-08
 
 ### Fixed

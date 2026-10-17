@@ -74,12 +74,13 @@ void main(void)
 
     ngpc_gfx_set_bg_color(RGB(0, 0, 6));
 
-    /* Palette 0 on scroll plane 1: colour 0 transparent, 1 white, 2 green, 3 cyan.
-     * The font tiles use palette colour 1 for the glyph strokes, so white
-     * text = colour 1 = RGB(15, 15, 15). */
+    /* Palette 0 on scroll plane 1: colour 0 transparent, 1 white, 2 green, 3 white.
+     * The BIOS font draws its glyph strokes with palette colour 3, so white
+     * text = colour 3 = RGB(15, 15, 15). Colour 1 gets the same white: a
+     * custom font drawn with colour 1 then looks the same. */
     ngpc_gfx_set_palette(GFX_SCR1, 0,
                          RGB(0, 0, 0), RGB(15, 15, 15),
-                         RGB(0, 15, 0), RGB(0, 15, 15));
+                         RGB(0, 15, 0), RGB(15, 15, 15));
     ngpc_gfx_clear(GFX_SCR1);
 
     /* (col=4, row=9) → near-centre of a 20x19 text grid. */
@@ -147,13 +148,14 @@ void main(void)
 
     ngpc_gfx_set_bg_color(RGB(0, 0, 6));
 
-    /* Text palette on plane 1, sprite palette on GFX_SPR. */
+    /* Text palette on plane 1, sprite palette on GFX_SPR. The font glyphs
+     * use colour 3, so colour 3 is the text / cursor colour. */
     ngpc_gfx_set_palette(GFX_SCR1, 0,
                          RGB(0, 0, 0), RGB(15, 15, 15),
-                         RGB(0, 15, 0), RGB(0, 15, 15));
+                         RGB(0, 15, 0), RGB(15, 15, 15));
     ngpc_gfx_set_palette(GFX_SPR, 0,
                          RGB(0, 0, 0), RGB(15, 15, 0),
-                         RGB(15, 8, 0), RGB(15, 0, 0));
+                         RGB(15, 8, 0), RGB(15, 15, 0));
 
     ngpc_gfx_clear(GFX_SCR1);
     ngpc_gfx_clear(GFX_SCR2);
@@ -547,7 +549,7 @@ void main(void)
     ngpc_gfx_set_bg_color(RGB(0, 0, 6));
     ngpc_gfx_set_palette(GFX_SCR1, 0,
                          RGB(0, 0, 0), RGB(15, 15, 15),
-                         RGB(0, 15, 0), RGB(15, 0, 0));
+                         RGB(0, 15, 0), RGB(15, 15, 15));
     ngpc_gfx_clear(GFX_SCR1);
     ngpc_gfx_clear(GFX_SCR2);
     ngpc_sprite_hide_all();
@@ -688,7 +690,9 @@ void main(void)
     /* Paint the 20x19 visible tilemap from the indices in grass_map[]. */
     for (ty = 0; ty < 19; ty++) {
         for (tx = 0; tx < 20; tx++) {
-            map_i = ty * 20 + tx;
+            /* Widen BEFORE the maths: cc900 would do "ty * 20 + tx" on
+             * 8 bits (wrong from row 13 on). */
+            map_i = (u16)ty * 20u + (u16)tx;
             ngpc_gfx_put_tile(GFX_SCR1, tx, ty, grass_map[map_i], 0);
         }
     }
@@ -953,7 +957,7 @@ void main(void)
     ngpc_gfx_set_bg_color(RGB(0, 0, 4));
     ngpc_gfx_set_palette(GFX_SCR1, 0,
                          RGB(0, 0, 0), RGB(15, 15, 15),
-                         RGB(0, 15, 15), RGB(15, 15, 0));
+                         RGB(0, 15, 15), RGB(15, 15, 15));
     ngpc_gfx_clear(GFX_SCR1);
     ngpc_gfx_clear(GFX_SCR2);
     ngpc_sprite_hide_all();

@@ -35,16 +35,22 @@ const NGPC_Memory = (() => {
   const scratch = new Uint8Array(0x10000);
 
   // ---- Budget tracking (for CPU / watchdog simulation) -----------------
-  // NGPC runs at 6.144 MHz with ~100 000 cycles visible per frame. Each
-  // memory-bus access costs roughly 1-2 cycles; we approximate at 1 and
-  // count every read+write the transpiled user code does. The host loop
-  // resets `opsThisFrame` each frame and warns when the counter exceeds
+  // We count every read+write the transpiled user code does, and the host
+  // loop resets `opsThisFrame` each frame and warns when the counter exceeds
   // the frame budget — same failure mode real hw hits when the main loop
   // spills past VBlank (missed sync, watchdog reset).
-  // Frame budget: ~100 000 cycles visible per frame on real NGPC (6.144 MHz
-  // minus VBlank overhead, HW_REGISTERS.md §7). Surfaced as a setter so the
-  // host UI (or user code via an exposed global) can relax the bar for
-  // larger projects — keep a 3×/10× toggle in mind rather than unbounded.
+  //
+  // What the unit really is: the CPU clock is 6.144 MHz, but one Toshiba
+  // "state" = 2 clock periods (TLCS-900/L1 manual; TMP95C061 datasheet), so
+  // a 60 Hz frame holds ~51 000 STATES, not 100 000 cycles. Instruction
+  // timings in the manual are in states (`ld r,r` = 2, memory loads 4+).
+  // A counted memory op is closer to one instruction than to one state, so
+  // the 100 000 ceiling below is OPTIMISTIC: it is a rough runaway / gross
+  // overload detector, not a calibrated CPU meter. Calibrating it needs a
+  // real ROM run side by side (MISE_A_JOUR_2026-10.md, B1).
+  //
+  // Surfaced as a setter so the host UI (or user code via an exposed
+  // global) can relax the bar for larger projects.
   let FRAME_BUDGET = 100000;
   let RUNAWAY_LIMIT = FRAME_BUDGET * 10;
   function setFrameBudget(n) {
